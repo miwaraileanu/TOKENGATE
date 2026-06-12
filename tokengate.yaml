@@ -1,0 +1,36 @@
+bind: "127.0.0.1"
+port: 8787
+log_level: "info"
+
+openai_base_url: "https://api.openai.com"
+anthropic_base_url: "https://api.anthropic.com"
+
+tiers:
+  - name: cheap
+    model: "claude-haiku-4-5-20251001"
+    max_difficulty: 0.4
+  - name: strong
+    model: "claude-sonnet-4-6"
+    max_difficulty: 1.0
+
+cache:
+  exact_ttl_seconds: 86400
+  semantic_threshold: 0.93
+  max_entries: 50000
+  blocklist_patterns:
+    - "\\btoday\\b"
+    - "\\bnow\\b"
+    - "\\blatest\\b"
+    - "\\bprice\\b"
+
+distill_threshold_tokens: 6000
+keep_recent_turns: 4
+
+budgets:
+  chat: 2048
+  code: 4096
+  extraction: 512
+  long_form: 8192
+
+# prices:
+#   my-custom-model: [1.00, 5.00]
