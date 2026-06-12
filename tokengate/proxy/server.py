@@ -7,9 +7,10 @@ from dataclasses import asdict
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+import json as _json
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from tokengate.core.normalize import normalize_openai, normalize_anthropic, serialize_for_upstream
-from tokengate.core.provider import call_upstream, UpstreamError
+from tokengate.core.provider import call_upstream, stream_upstream, UpstreamError
 from tokengate.core.tokens import compute_cost
 
 from tokengate.core.config import Settings
@@ -175,4 +176,44 @@ async def _non_streaming_response(req, ctx: LayerContext, s: Settings, start_ts:
 
 
 async def _streaming_response(req, ctx: LayerContext, s: Settings, start_ts: float):
-    raise NotImplementedError("Streaming not yet implemented (Task 11)")
+    tg_headers = {
+        "x-tokengate-cache": "none",
+        "x-tokengate-model": req.model,
+        "x-tokengate-saved-tokens": "0",
+        "cache-control": "no-cache",
+    }
+
+    async def generate():
+        status = "ok"
+        error_detail = None
+        tokens_in = tokens_out = 0
+        model = req.model
+
+        try:
+            async for chunk in stream_upstream(req, s, transport=_transport):
+                if isinstance(chunk, dict) and chunk.get("_usage"):
+                    tokens_in = chunk["tokens_in"]
+                    tokens_out = chunk["tokens_out"]
+                    model = chunk.get("model", model)
+                else:
+                    yield chunk
+        except UpstreamError as e:
+            status = "upstream_error"
+            error_detail = str(e)
+            yield _json.dumps(e.body).encode()
+        except Exception as e:
+            status = "upstream_error"
+            error_detail = str(e)
+        finally:
+            cost = compute_cost(model, tokens_in, tokens_out, s)
+            latency_ms = int((time.time() - start_ts) * 1000)
+            write_row(
+                s.db_path,
+                ts=start_ts, route=req.route, status=status, error_detail=error_detail,
+                layers_applied=[asdict(d) for d in ctx.decisions],
+                tokens_in_raw=tokens_in or None, tokens_in_final=tokens_in or None,
+                tokens_out=tokens_out or None, model_used=model,
+                latency_ms=latency_ms, est_cost_usd=cost,
+            )
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers=tg_headers)
