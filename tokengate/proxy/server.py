@@ -7,7 +7,10 @@ from dataclasses import asdict
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from tokengate.core.normalize import normalize_openai, normalize_anthropic, serialize_for_upstream
+from tokengate.core.provider import call_upstream, UpstreamError
+from tokengate.core.tokens import compute_cost
 
 from tokengate.core.config import Settings
 from tokengate.core.context import LayerContext
@@ -96,3 +99,73 @@ async def _run_pipeline(ctx: LayerContext) -> LayerContext:
 async def stats_endpoint():
     s = get_settings()
     return get_stats(s.db_path)
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    s = get_settings()
+    start_ts = time.time()
+    body = await request.json()
+    req = normalize_openai(body, dict(request.headers))
+    ctx = LayerContext(request=req)
+    ctx = await _run_pipeline(ctx)
+    return await _handle_request(req, ctx, s, start_ts)
+
+
+@app.post("/v1/messages")
+async def messages(request: Request):
+    s = get_settings()
+    start_ts = time.time()
+    body = await request.json()
+    req = normalize_anthropic(body, dict(request.headers))
+    ctx = LayerContext(request=req)
+    ctx = await _run_pipeline(ctx)
+    return await _handle_request(req, ctx, s, start_ts)
+
+
+async def _handle_request(req, ctx: LayerContext, s: Settings, start_ts: float):
+    if req.stream:
+        return await _streaming_response(req, ctx, s, start_ts)
+    return await _non_streaming_response(req, ctx, s, start_ts)
+
+
+async def _non_streaming_response(req, ctx: LayerContext, s: Settings, start_ts: float):
+    status = "ok"
+    error_detail = None
+    resp_body: dict = {}
+    tokens_in = tokens_out = 0
+    model = req.model
+
+    try:
+        upstream_resp = await call_upstream(req, s, transport=_transport)
+        tokens_in = upstream_resp.tokens_in
+        tokens_out = upstream_resp.tokens_out
+        model = upstream_resp.model
+        resp_body = upstream_resp.raw_body
+    except UpstreamError as e:
+        status = "upstream_error"
+        error_detail = str(e)
+        resp_body = e.body
+
+    cost = compute_cost(model, tokens_in, tokens_out, s)
+    latency_ms = int((time.time() - start_ts) * 1000)
+    write_row(
+        s.db_path,
+        ts=start_ts, route=req.route, status=status, error_detail=error_detail,
+        layers_applied=[asdict(d) for d in ctx.decisions],
+        tokens_in_raw=tokens_in or None, tokens_in_final=tokens_in or None,
+        tokens_out=tokens_out or None, model_used=model,
+        latency_ms=latency_ms, est_cost_usd=cost,
+    )
+
+    tg_headers = {
+        "x-tokengate-cache": "none",
+        "x-tokengate-model": model,
+        "x-tokengate-saved-tokens": "0",
+    }
+    http_status = 200 if status == "ok" else 502
+    return JSONResponse(content=resp_body, status_code=http_status, headers=tg_headers)
+
+
+async def _streaming_response(req, ctx: LayerContext, s: Settings, start_ts: float):
+    raise NotImplementedError("Streaming not yet implemented (Task 11)")

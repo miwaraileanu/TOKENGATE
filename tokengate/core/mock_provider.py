@@ -76,5 +76,5 @@ class MockTransport(httpx.AsyncBaseTransport):
             content = (_ANT_STREAM if is_anthropic else _OAI_STREAM).encode()
             return httpx.Response(200, content=content, headers={"content-type": "text/event-stream"})
 
-        resp = {**(_ANT_BODY if is_anthropic else _OAI_BODY), "model": body.get("model", "mock")}
+        resp = {**(_ANT_BODY if is_anthropic else _OAI_BODY)}
         return httpx.Response(200, json=resp)
