@@ -136,16 +136,23 @@ async def _non_streaming_response(req, ctx: LayerContext, s: Settings, start_ts:
     tokens_in = tokens_out = 0
     model = req.model
 
-    try:
-        upstream_resp = await call_upstream(req, s, transport=_transport)
-        tokens_in = upstream_resp.tokens_in
-        tokens_out = upstream_resp.tokens_out
-        model = upstream_resp.model
-        resp_body = upstream_resp.raw_body
-    except UpstreamError as e:
-        status = "upstream_error"
-        error_detail = str(e)
-        resp_body = e.body
+    if ctx.response is not None:
+        # Pipeline short-circuited (cache hit) — use the cached response
+        tokens_in = ctx.response.tokens_in
+        tokens_out = ctx.response.tokens_out
+        model = ctx.response.model
+        resp_body = ctx.response.raw_body
+    else:
+        try:
+            upstream_resp = await call_upstream(req, s, transport=_transport)
+            tokens_in = upstream_resp.tokens_in
+            tokens_out = upstream_resp.tokens_out
+            model = upstream_resp.model
+            resp_body = upstream_resp.raw_body
+        except UpstreamError as e:
+            status = "upstream_error"
+            error_detail = str(e)
+            resp_body = e.body
 
     cost = compute_cost(model, tokens_in, tokens_out, s)
     latency_ms = int((time.time() - start_ts) * 1000)

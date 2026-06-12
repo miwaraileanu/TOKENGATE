@@ -6,7 +6,6 @@ from tokengate.core.provider import call_upstream, UpstreamError
 from tokengate.core.mock_provider import MockTransport
 from fastapi.testclient import TestClient
 from tokengate.analytics.db import init_db
-from tokengate.proxy import server as _server
 import tokengate.proxy.server as _sv
 
 
@@ -145,9 +144,8 @@ def test_analytics_row_written_on_success(test_client):
 
 def test_analytics_row_on_upstream_error(test_client, monkeypatch):
     import sqlite3
-    from tokengate.core.mock_provider import MockTransport as MT
     client, _, s = test_client
-    monkeypatch.setattr(_sv, "_transport", MT(mode="error", error_status=500))
+    monkeypatch.setattr(_sv, "_transport", MockTransport(mode="error", error_status=500))
     resp = client.post("/v1/chat/completions",
                        json={"model": "gpt-4o", "messages": []},
                        headers={"accept": "application/json"})
