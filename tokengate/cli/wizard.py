@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import shutil
 import stat
 import sys
 from pathlib import Path
@@ -8,7 +9,6 @@ from rich.console import Console
 from rich.prompt import Prompt, Confirm
 
 from tokengate.analytics.db import init_db
-from tokengate.core.config import Settings
 
 console = Console()
 
@@ -55,28 +55,47 @@ def run_wizard(
     data_dir.mkdir(parents=True, exist_ok=True)
     env_path = data_dir / ".env"
 
-    key_var = "ANTHROPIC_API_KEY" if provider in ("anthropic", "both") else "OPENAI_API_KEY"
-    existing = os.environ.get(key_var, "")
+    if provider in ("anthropic", "both"):
+        key_var = "ANTHROPIC_API_KEY"
+        existing = os.environ.get(key_var, "")
+        if existing and yes:
+            api_key = existing
+        else:
+            api_key = Prompt.ask(f"{key_var} (hidden)", password=True)
+        _write_env(env_path, key_var, api_key)
+        console.print(
+            f"[green]✓[/green] {key_var} written to [bold]{env_path}[/bold] (owner-only permissions)\n"
+            "[yellow]Note:[/yellow] Key is stored but [bold]not validated[/bold]. "
+            "Run [cyan]rait test --live[/cyan] (coming in a later release) to verify."
+        )
 
-    if existing and yes:
-        api_key = existing
-    else:
-        api_key = Prompt.ask(f"{key_var} (hidden)", password=True)
-
-    _write_env(env_path, key_var, api_key)
-    console.print(
-        f"[green]✓[/green] API key written to [bold]{env_path}[/bold] (owner-only permissions)\n"
-        "[yellow]Note:[/yellow] Key is stored but [bold]not validated[/bold]. "
-        "Run [cyan]rait test --live[/cyan] (coming in a later release) to verify."
-    )
+    if provider in ("openai", "both"):
+        key_var = "OPENAI_API_KEY"
+        existing = os.environ.get(key_var, "")
+        if existing and yes:
+            api_key = existing
+        else:
+            api_key = Prompt.ask(f"{key_var} (hidden)", password=True)
+        _write_env(env_path, key_var, api_key)
+        if provider == "openai":
+            console.print(
+                f"[green]✓[/green] {key_var} written to [bold]{env_path}[/bold] (owner-only permissions)\n"
+                "[yellow]Note:[/yellow] Key is stored but [bold]not validated[/bold]. "
+                "Run [cyan]rait test --live[/cyan] (coming in a later release) to verify."
+            )
 
     # ── 3. Port ───────────────────────────────────────────────────────────────
     if port is None:
         if yes:
             port = 8787
         else:
-            raw = Prompt.ask("Gateway port", default="8787")
-            port = int(raw)
+            while True:
+                raw = Prompt.ask("Gateway port", default="8787")
+                try:
+                    port = int(raw)
+                    break
+                except ValueError:
+                    console.print("[red]Please enter a valid port number.[/red]")
 
     # ── 4. Write config ────────────────────────────────────────────────────────
     cfg_path = data_dir / "tokengate.yaml"
@@ -84,10 +103,9 @@ def run_wizard(
     console.print(f"[green]✓[/green] Config written to [bold]{cfg_path}[/bold]")
 
     # ── 5. Init DB ─────────────────────────────────────────────────────────────
-    os.environ["TOKENGATE_DATA_DIR"] = str(data_dir)
-    s = Settings()
-    init_db(s.db_path)
-    console.print(f"[green]✓[/green] Database initialised at [bold]{s.db_path}[/bold]")
+    db_path = data_dir / "tokengate.db"
+    init_db(db_path)
+    console.print(f"[green]✓[/green] Database initialised at [bold]{db_path}[/bold]")
 
     # ── 6. Integration snippet ────────────────────────────────────────────────
     snippet = _SNIPPET_ANTHROPIC if provider in ("anthropic", "both") else _SNIPPET_OPENAI
@@ -96,8 +114,10 @@ def run_wizard(
     # ── 7. Offer to start ─────────────────────────────────────────────────────
     if yes or Confirm.ask("Start TokenGate now (detached)?", default=True):
         from tokengate.cli.daemon import check_port_or_exit, start_detached
-        check_port_or_exit("127.0.0.1", port, s.pid_path)
-        start_detached("127.0.0.1", port, s.pid_path, s.log_path)
+        pid_path = data_dir / "tokengate.pid"
+        log_path = data_dir / "logs" / "tokengate.log"
+        check_port_or_exit("127.0.0.1", port, pid_path)
+        start_detached("127.0.0.1", port, pid_path, log_path)
 
 
 def _write_env(env_path: Path, key_var: str, value: str) -> None:
@@ -115,13 +135,17 @@ def _write_env(env_path: Path, key_var: str, value: str) -> None:
 
 
 def _write_config(cfg_path: Path, port: int) -> None:
-    import shutil, tokengate
-    default_cfg = Path(tokengate.__file__).parent.parent / "tokengate.yaml"
-    if default_cfg.exists():
-        shutil.copy(default_cfg, cfg_path)
-    # Patch the port
+    # Try to find the default config bundled with the package
+    try:
+        import tokengate
+        default_cfg = Path(tokengate.__file__).parent.parent / "tokengate.yaml"
+        if default_cfg.exists():
+            shutil.copy(default_cfg, cfg_path)
+    except Exception:
+        pass
+    # Start from existing file or minimal default
     text = cfg_path.read_text() if cfg_path.exists() else "bind: '127.0.0.1'\n"
-    lines = [l for l in text.splitlines() if not l.startswith("port:")]
+    lines = [line for line in text.splitlines() if not line.startswith("port:")]
     lines.insert(0, f"port: {port}")
     cfg_path.write_text("\n".join(lines) + "\n")
 
@@ -129,8 +153,9 @@ def _write_config(cfg_path: Path, port: int) -> None:
 def _win_set_owner_only(path: Path) -> None:
     try:
         import subprocess
+        username = os.environ.get("USERNAME") or os.getlogin()
         subprocess.run(
-            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{os.getlogin()}:(R,W)"],
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{username}:(R,W)"],
             check=True, capture_output=True,
         )
     except Exception:
