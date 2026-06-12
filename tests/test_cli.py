@@ -7,6 +7,10 @@ from tokengate.cli.daemon import (
     is_port_free, check_port_or_exit, _pid_alive,
     stop_daemon, status_daemon,
 )
+from typer.testing import CliRunner
+from tokengate.cli.main import app as cli_app
+
+cli_runner = CliRunner()
 
 
 @pytest.fixture
@@ -127,3 +131,36 @@ def test_status_daemon_running(pid_path, capsys):
     out = capsys.readouterr().out
     assert str(os.getpid()) in out
     assert "8787" in out
+
+
+def test_rait_help():
+    result = cli_runner.invoke(cli_app, ["--help"])
+    assert result.exit_code == 0
+    assert "install" in result.output
+    assert "start" in result.output
+    assert "stop" in result.output
+    assert "status" in result.output
+
+
+def test_rait_status_no_pid(tmp_path, monkeypatch):
+    monkeypatch.setenv("TOKENGATE_DATA_DIR", str(tmp_path))
+    result = cli_runner.invoke(cli_app, ["status"])
+    assert result.exit_code == 0
+    assert "not running" in result.output.lower()
+
+
+def test_rait_stop_no_pid(tmp_path, monkeypatch):
+    monkeypatch.setenv("TOKENGATE_DATA_DIR", str(tmp_path))
+    result = cli_runner.invoke(cli_app, ["stop"])
+    assert result.exit_code == 0
+    assert "not running" in result.output.lower()
+
+
+def test_rait_status_stale_pid(tmp_path, monkeypatch):
+    monkeypatch.setenv("TOKENGATE_DATA_DIR", str(tmp_path))
+    from tokengate.cli.daemon import write_pid_file
+    write_pid_file(tmp_path / "tokengate.pid", pid=999999999, port=8787)
+    result = cli_runner.invoke(cli_app, ["status"])
+    assert result.exit_code == 0
+    assert "stale" in result.output.lower() or "not running" in result.output.lower()
+    assert not (tmp_path / "tokengate.pid").exists()
