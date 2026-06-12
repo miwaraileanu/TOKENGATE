@@ -1,4 +1,3 @@
-import os
 import sqlite3
 import pytest
 from fastapi.testclient import TestClient
@@ -91,3 +90,21 @@ def test_streaming_token_counts_from_final_usage_event(streaming_client):
     # MockTransport reports exactly 10 in / 5 out in the usage event
     assert row[0] == 10
     assert row[1] == 5
+
+
+def test_streaming_upstream_error_logged(streaming_client, monkeypatch):
+    import sqlite3
+    from tokengate.core.mock_provider import MockTransport as MT
+    import tokengate.proxy.server as sv
+    client, s = streaming_client
+    monkeypatch.setattr(sv, "_transport", MT(mode="error", error_status=500))
+    with client.stream(
+        "POST", "/v1/chat/completions",
+        json={"model": "gpt-4o", "messages": [], "stream": True},
+    ) as resp:
+        resp.read()
+    con = sqlite3.connect(s.db_path)
+    row = con.execute("SELECT status, error_detail FROM requests").fetchone()
+    con.close()
+    assert row[0] == "upstream_error"
+    assert row[1] is not None

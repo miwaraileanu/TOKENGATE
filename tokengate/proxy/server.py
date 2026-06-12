@@ -202,6 +202,9 @@ async def _streaming_response(req, ctx: LayerContext, s: Settings, start_ts: flo
             error_detail = str(e)
             yield _json.dumps(e.body).encode()
         except Exception as e:
+            # Non-UpstreamError (e.g. network timeout, decode error).
+            # Cannot yield error SSE here — stream may be partially sent.
+            # Status and error_detail are recorded in the finally block.
             status = "upstream_error"
             error_detail = str(e)
         finally:
