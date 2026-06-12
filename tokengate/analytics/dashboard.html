@@ -100,9 +100,20 @@ async function load() {
     costEl.innerHTML = stats.total_est_cost_usd == null
       ? '<span class="unknown">unknown</span>'
       : `$${fmt(stats.total_est_cost_usd, 4)}`
-    document.getElementById('total-saved').textContent = `$${fmt(stats.total_est_saved_usd, 4)}`
+    document.getElementById('total-saved').innerHTML = `$${fmt(stats.total_est_saved_usd, 4)}`
     document.getElementById('cache-rate').textContent = `${(stats.cache_hit_rate * 100).toFixed(1)}%`
     updateCharts(stats.daily)
+    const tbody = document.getElementById('rows')
+    tbody.innerHTML = (recent || []).map(r => `<tr>
+      <td>${fmtDate(r.ts)}</td>
+      <td>${r.route}</td>
+      <td>${badgeStatus(r.status)}</td>
+      <td>${r.model_used || '—'}</td>
+      <td>${fmtInt(r.tokens_in_raw)}</td>
+      <td>${fmtInt(r.tokens_out)}</td>
+      <td>${r.latency_ms != null ? r.latency_ms+'ms' : '—'}</td>
+      <td>${r.est_cost_usd == null ? '<span class="unknown">unknown</span>' : '$'+fmt(r.est_cost_usd, 4)}</td>
+    </tr>`).join('')
   } catch(e) { console.error(e) }
 }
 

@@ -1,14 +1,14 @@
 from __future__ import annotations
 import ipaddress
+import json
 import sys
 import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
-import json as _json
-from pathlib import Path as _Path
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from tokengate.core.normalize import normalize_openai, normalize_anthropic, serialize_for_upstream
 from tokengate.core.provider import call_upstream, stream_upstream, UpstreamError
@@ -17,7 +17,7 @@ from tokengate.core.tokens import compute_cost
 from tokengate.core.config import Settings
 from tokengate.core.context import LayerContext
 from tokengate.analytics.db import init_db, write_row
-from tokengate.analytics.stats import get_stats
+from tokengate.analytics.stats import get_stats, get_recent
 import tokengate.layers.exact_cache as _l_exact
 import tokengate.layers.semantic_cache as _l_semantic
 import tokengate.layers.distiller as _l_distiller
@@ -103,9 +103,15 @@ async def stats_endpoint():
     return get_stats(s.db_path)
 
 
+@app.get("/stats/recent")
+async def stats_recent():
+    s = get_settings()
+    return get_recent(s.db_path)
+
+
 @app.get("/dashboard")
 async def dashboard():
-    html_path = _Path(__file__).parent.parent / "analytics" / "dashboard.html"
+    html_path = Path(__file__).parent.parent / "analytics" / "dashboard.html"
     return FileResponse(html_path, media_type="text/html")
 
 
@@ -207,7 +213,7 @@ async def _streaming_response(req, ctx: LayerContext, s: Settings, start_ts: flo
         except UpstreamError as e:
             status = "upstream_error"
             error_detail = str(e)
-            yield _json.dumps(e.body).encode()
+            yield json.dumps(e.body).encode()
         except Exception as e:
             # Non-UpstreamError (e.g. network timeout, decode error).
             # Cannot yield error SSE here — stream may be partially sent.

@@ -54,3 +54,20 @@ def get_stats(db_path: Path) -> dict:
         "requests_by_status": by_status,
         "daily": daily,
     }
+
+
+def get_recent(db_path: Path, limit: int = 50) -> list[dict]:
+    """Return the last `limit` request rows, newest first."""
+    if not db_path.exists():
+        return []
+    with sqlite3.connect(db_path) as con:
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            """SELECT ts, route, status, model_used, tokens_in_raw,
+                      tokens_out, latency_ms, est_cost_usd
+               FROM requests
+               ORDER BY ts DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
