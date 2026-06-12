@@ -1,7 +1,9 @@
 import sqlite3
 import time
+import time as _time
 import pytest
 from tokengate.analytics.db import init_db, write_row
+from tokengate.analytics.stats import get_stats
 
 
 @pytest.fixture
@@ -84,3 +86,35 @@ def test_index_on_ts_exists(db_path):
     rows = con.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
     con.close()
     assert any("requests_ts" in r[0] for r in rows)
+
+
+def test_get_stats_empty(db_path):
+    stats = get_stats(db_path)
+    assert stats["total_requests"] == 0
+    assert stats["cache_hit_rate"] == 0.0
+    assert stats["daily"] == []
+
+
+def test_get_stats_totals(db_path):
+    ts = _time.time()
+    write_row(db_path, ts=ts, route="openai", status="ok",
+              tokens_in_raw=100, tokens_in_final=100, tokens_out=50,
+              model_used="gpt-4o", est_cost_usd=0.001)
+    write_row(db_path, ts=ts, route="anthropic", status="ok",
+              tokens_in_raw=200, tokens_in_final=200, tokens_out=100,
+              model_used="claude-sonnet-4-6", est_cost_usd=0.002)
+    stats = get_stats(db_path)
+    assert stats["total_requests"] == 2
+    assert stats["total_tokens_in"] == 300
+    assert stats["total_tokens_out"] == 150
+    assert stats["requests_by_status"]["ok"] == 2
+
+
+def test_get_stats_null_cost_excluded_from_total(db_path):
+    ts = _time.time()
+    write_row(db_path, ts=ts, route="openai", status="ok",
+              tokens_in_raw=10, tokens_in_final=10, tokens_out=5,
+              model_used="unknown-xyz", est_cost_usd=None)
+    stats = get_stats(db_path)
+    # SUM of NULL values is NULL — total_est_cost_usd should be None, not 0
+    assert stats["total_est_cost_usd"] is None
