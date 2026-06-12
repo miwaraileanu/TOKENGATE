@@ -43,7 +43,10 @@ def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
-    except (ProcessLookupError, OSError):
+    except PermissionError:
+        # Process exists but is owned by another user — treat as alive
+        return True
+    except OSError:
         return False
 
 
@@ -71,6 +74,7 @@ def is_port_free(host: str, port: int) -> bool:
 
 
 def check_port_or_exit(host: str, port: int, pid_path: Path) -> None:
+    # pid_path is reserved for future use (e.g., stale PID cleanup before start)
     if not is_port_free(host, port):
         print(
             f"Port {port} in use — is TokenGate already running? Try `rait status`.",
@@ -117,6 +121,7 @@ def start_detached(host: str, port: int, pid_path: Path, log_path: Path) -> None
             cmd, stdout=log_file, stderr=log_file,
             start_new_session=True, close_fds=True,
         )
+    log_file.close()
 
     # Give the process a moment to start, then write PID
     time.sleep(0.5)

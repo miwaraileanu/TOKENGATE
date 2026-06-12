@@ -1,14 +1,11 @@
-import json
 import os
-import signal
 import socket
-import sys
-import time
 import pytest
-from pathlib import Path
+from unittest.mock import patch, MagicMock
 from tokengate.cli.daemon import (
     read_pid_file, write_pid_file, remove_pid_file,
     is_port_free, check_port_or_exit, _pid_alive,
+    stop_daemon, status_daemon,
 )
 
 
@@ -82,3 +79,51 @@ def test_stale_pid_file_detected(pid_path):
     data = read_pid_file(pid_path)
     assert data is not None
     assert not _pid_alive(data["pid"])
+
+
+# ---- stop_daemon tests ----
+
+def test_stop_daemon_not_running(tmp_path, capsys):
+    """stop_daemon prints 'not running' when there is no PID file."""
+    stop_daemon(tmp_path / "missing.pid")
+    assert "not running" in capsys.readouterr().out.lower()
+
+
+def test_stop_daemon_stale_pid(pid_path, capsys):
+    """stop_daemon removes stale PID file and prints message."""
+    write_pid_file(pid_path, pid=999999999, port=8787)
+    stop_daemon(pid_path)
+    assert not pid_path.exists()
+    assert "stale" in capsys.readouterr().out.lower()
+
+
+def test_stop_daemon_kills_live_process(pid_path, capsys):
+    """stop_daemon sends SIGTERM/CTRL_BREAK to a live process."""
+    write_pid_file(pid_path, pid=os.getpid(), port=8787)
+    with patch("tokengate.cli.daemon.os.kill") as mock_kill, \
+         patch("tokengate.cli.daemon._pid_is_tokengate", return_value=True):
+        stop_daemon(pid_path)
+        mock_kill.assert_called_once()
+    assert not pid_path.exists()
+
+
+# ---- status_daemon tests ----
+
+def test_status_daemon_not_running(tmp_path, capsys):
+    status_daemon(tmp_path / "missing.pid")
+    assert "not running" in capsys.readouterr().out.lower()
+
+
+def test_status_daemon_stale_pid(pid_path, capsys):
+    write_pid_file(pid_path, pid=999999999, port=8787)
+    status_daemon(pid_path)
+    assert not pid_path.exists()
+    assert "stale" in capsys.readouterr().out.lower()
+
+
+def test_status_daemon_running(pid_path, capsys):
+    write_pid_file(pid_path, pid=os.getpid(), port=8787)
+    status_daemon(pid_path)
+    out = capsys.readouterr().out
+    assert str(os.getpid()) in out
+    assert "8787" in out
