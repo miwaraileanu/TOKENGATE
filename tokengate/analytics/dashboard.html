@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TokenGate Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh;padding:24px}
+  h1{font-size:1.5rem;font-weight:700;margin-bottom:24px;color:#f1f5f9}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:32px}
+  .card{background:#1e2330;border-radius:12px;padding:20px}
+  .card .label{font-size:.75rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px}
+  .card .value{font-size:1.75rem;font-weight:700;color:#f1f5f9}
+  .card .value.unknown{color:#64748b;font-size:1rem}
+  .charts{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:32px}
+  @media(max-width:768px){.charts{grid-template-columns:1fr}}
+  .chart-box{background:#1e2330;border-radius:12px;padding:20px}
+  .chart-box h2{font-size:.9rem;color:#94a3b8;margin-bottom:16px}
+  table{width:100%;border-collapse:collapse;background:#1e2330;border-radius:12px;overflow:hidden}
+  th{text-align:left;padding:12px 16px;font-size:.75rem;color:#64748b;text-transform:uppercase;border-bottom:1px solid #2d3748}
+  td{padding:10px 16px;font-size:.85rem;border-bottom:1px solid #1a202c}
+  tr:last-child td{border-bottom:none}
+  .badge{display:inline-block;padding:2px 8px;border-radius:9999px;font-size:.7rem;font-weight:600}
+  .badge-ok{background:#14532d;color:#4ade80}
+  .badge-error{background:#7f1d1d;color:#f87171}
+  .badge-auth{background:#78350f;color:#fbbf24}
+  #refresh-info{font-size:.75rem;color:#475569;margin-bottom:16px}
+</style>
+</head>
+<body>
+<h1>TokenGate Dashboard</h1>
+<p id="refresh-info">Refreshing every 10 seconds</p>
+
+<div class="cards">
+  <div class="card"><div class="label">Requests</div><div class="value" id="total-requests">—</div></div>
+  <div class="card"><div class="label">Tokens In</div><div class="value" id="total-tokens-in">—</div></div>
+  <div class="card"><div class="label">Tokens Out</div><div class="value" id="total-tokens-out">—</div></div>
+  <div class="card"><div class="label">Est. Cost</div><div class="value" id="total-cost">—</div></div>
+  <div class="card"><div class="label">Est. Saved</div><div class="value" id="total-saved">—</div></div>
+  <div class="card"><div class="label">Cache Hit Rate</div><div class="value" id="cache-rate">—</div></div>
+</div>
+
+<div class="charts">
+  <div class="chart-box"><h2>Daily Requests</h2><canvas id="req-chart" height="180"></canvas></div>
+  <div class="chart-box"><h2>Daily Cost (USD)</h2><canvas id="cost-chart" height="180"></canvas></div>
+</div>
+
+<table>
+  <thead><tr>
+    <th>Time</th><th>Route</th><th>Status</th><th>Model</th>
+    <th>Tokens In</th><th>Tokens Out</th><th>Latency</th><th>Cost</th>
+  </tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<script>
+const fmt = (n, d=2) => n == null ? '<span class="unknown">unknown</span>' : Number(n).toFixed(d)
+const fmtInt = n => n == null ? '—' : Number(n).toLocaleString()
+const fmtDate = ts => new Date(ts * 1000).toLocaleTimeString()
+
+let reqChart, costChart
+
+function initCharts(labels, reqData, costData) {
+  const opts = {responsive:true, plugins:{legend:{display:false}},
+    scales:{x:{ticks:{color:'#64748b'}},y:{ticks:{color:'#64748b'},grid:{color:'#2d3748'}}}}
+  reqChart = new Chart(document.getElementById('req-chart'), {
+    type:'line', data:{labels, datasets:[{data:reqData, borderColor:'#6366f1', tension:.3, fill:false}]}, options:opts
+  })
+  costChart = new Chart(document.getElementById('cost-chart'), {
+    type:'bar', data:{labels, datasets:[{data:costData, backgroundColor:'#0ea5e9'}]}, options:opts
+  })
+}
+
+function updateCharts(daily) {
+  const labels = daily.map(d => d.date).reverse()
+  const reqData = daily.map(d => d.requests).reverse()
+  const costData = daily.map(d => d.est_cost_usd || 0).reverse()
+  if (!reqChart) { initCharts(labels, reqData, costData); return }
+  reqChart.data.labels = labels; reqChart.data.datasets[0].data = reqData; reqChart.update()
+  costChart.data.labels = labels; costChart.data.datasets[0].data = costData; costChart.update()
+}
+
+function badgeStatus(s) {
+  const cls = s === 'ok' ? 'badge-ok' : s === 'auth_error' ? 'badge-auth' : 'badge-error'
+  return `<span class="badge ${cls}">${s}</span>`
+}
+
+async function load() {
+  try {
+    const [stats, recent] = await Promise.all([
+      fetch('/stats').then(r => r.json()),
+      fetch('/stats/recent').then(r => r.json()).catch(() => []),
+    ])
+    document.getElementById('total-requests').textContent = fmtInt(stats.total_requests)
+    document.getElementById('total-tokens-in').textContent = fmtInt(stats.total_tokens_in)
+    document.getElementById('total-tokens-out').textContent = fmtInt(stats.total_tokens_out)
+    const costEl = document.getElementById('total-cost')
+    costEl.innerHTML = stats.total_est_cost_usd == null
+      ? '<span class="unknown">unknown</span>'
+      : `$${fmt(stats.total_est_cost_usd, 4)}`
+    document.getElementById('total-saved').textContent = `$${fmt(stats.total_est_saved_usd, 4)}`
+    document.getElementById('cache-rate').textContent = `${(stats.cache_hit_rate * 100).toFixed(1)}%`
+    updateCharts(stats.daily)
+  } catch(e) { console.error(e) }
+}
+
+load()
+setInterval(load, 10000)
+</script>
+</body>
+</html>

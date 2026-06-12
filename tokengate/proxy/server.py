@@ -8,7 +8,8 @@ from dataclasses import asdict
 import httpx
 from fastapi import FastAPI, Request
 import json as _json
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pathlib import Path as _Path
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from tokengate.core.normalize import normalize_openai, normalize_anthropic, serialize_for_upstream
 from tokengate.core.provider import call_upstream, stream_upstream, UpstreamError
 from tokengate.core.tokens import compute_cost
@@ -100,6 +101,12 @@ async def _run_pipeline(ctx: LayerContext) -> LayerContext:
 async def stats_endpoint():
     s = get_settings()
     return get_stats(s.db_path)
+
+
+@app.get("/dashboard")
+async def dashboard():
+    html_path = _Path(__file__).parent.parent / "analytics" / "dashboard.html"
+    return FileResponse(html_path, media_type="text/html")
 
 
 @app.post("/v1/chat/completions")
