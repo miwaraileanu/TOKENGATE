@@ -162,5 +162,5 @@ def test_rait_status_stale_pid(tmp_path, monkeypatch):
     write_pid_file(tmp_path / "tokengate.pid", pid=999999999, port=8787)
     result = cli_runner.invoke(cli_app, ["status"])
     assert result.exit_code == 0
-    assert "stale" in result.output.lower() or "not running" in result.output.lower()
+    assert "stale" in result.output.lower()
     assert not (tmp_path / "tokengate.pid").exists()

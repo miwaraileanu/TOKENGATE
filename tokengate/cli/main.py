@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import os
 from pathlib import Path
 from typing import Optional
@@ -10,7 +11,7 @@ app = typer.Typer(help="rait — TokenGate CLI", add_completion=False)
 console = Console()
 
 
-def _get_settings():
+def _get_settings() -> "Settings":
     from tokengate.core.config import Settings
     return Settings()
 
@@ -61,7 +62,6 @@ def status():
 def stats():
     """Print token savings summary."""
     from tokengate.analytics.stats import get_stats
-    import json
     s = _get_settings()
     if not s.db_path.exists():
         console.print("[yellow]No analytics data yet. Start the gateway and make some requests.[/yellow]")
@@ -74,8 +74,8 @@ def stats():
 def cache_cmd(
     clear: bool = typer.Option(False, "--clear", help="Clear all caches"),
 ):
-    """Manage the cache (stub — implemented in Phase 2)."""
-    console.print("[yellow]Cache management is available from Phase 2 onwards.[/yellow]")
+    """Manage the cache (stub — all options implemented in Phase 2)."""
+    console.print("[yellow]Cache management (including --clear) is available from Phase 2 onwards.[/yellow]")
 
 
 @app.command("test")
