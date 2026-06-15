@@ -25,6 +25,21 @@ CREATE TABLE IF NOT EXISTS requests (
     est_saved_usd   REAL    NOT NULL DEFAULT 0.0
 );
 CREATE INDEX IF NOT EXISTS requests_ts ON requests(ts);
+
+CREATE TABLE IF NOT EXISTS cache_exact (
+    cache_key  TEXT PRIMARY KEY,
+    expires_at REAL NOT NULL,
+    body_json  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cache_exact_exp ON cache_exact(expires_at);
+
+CREATE TABLE IF NOT EXISTS cache_semantic (
+    cache_key  TEXT PRIMARY KEY,
+    embedding  BLOB NOT NULL,
+    body_json  TEXT NOT NULL,
+    ts         REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cache_semantic_ts ON cache_semantic(ts);
 """
 
 
