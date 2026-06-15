@@ -86,6 +86,7 @@ def load_index(db_path: Path, max_entries: int) -> None:
         return
     con = sqlite3.connect(db_path)
     rows = con.execute(
+        # ASC so oldest entry is at front of OrderedDict — required for LRU eviction
         "SELECT cache_key, embedding, body_json FROM cache_semantic ORDER BY ts ASC"
     ).fetchall()
     con.close()

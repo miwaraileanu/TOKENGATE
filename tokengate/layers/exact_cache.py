@@ -15,6 +15,8 @@ def _compute_key(req) -> str:
         "model": req.model,
         "temp": temp_bucket,
         "tools": req.tools,
+        "max_tokens": req.max_tokens,
+        "extra": req.extra,
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=True).encode()
