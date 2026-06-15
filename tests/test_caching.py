@@ -115,3 +115,52 @@ def test_db_cache_semantic_has_expected_columns(tmp_path):
     cols = {r[1] for r in con.execute("PRAGMA table_info(cache_semantic)").fetchall()}
     con.close()
     assert {"cache_key", "embedding", "body_json", "ts"} <= cols
+
+
+# ── Task 2: Settings cache fields ────────────────────────────────────────────
+
+def test_settings_cache_exact_ttl_default(tmp_path):
+    s = make_settings(tmp_path)
+    assert s.cache_exact_ttl == 86400
+
+
+def test_settings_cache_semantic_threshold_default(tmp_path):
+    s = make_settings(tmp_path)
+    assert s.cache_semantic_threshold == 0.93
+
+
+def test_settings_cache_max_entries_default(tmp_path):
+    s = make_settings(tmp_path)
+    assert s.cache_max_entries == 50000
+
+
+def test_settings_cache_blocklist_default(tmp_path):
+    s = make_settings(tmp_path)
+    assert isinstance(s.cache_blocklist, list)
+    assert len(s.cache_blocklist) > 0
+
+
+def test_settings_cache_serve_unverified_default_false(tmp_path):
+    s = make_settings(tmp_path)
+    assert s.cache_serve_unverified is False
+
+
+def test_settings_cache_fields_read_from_yaml(tmp_path):
+    import yaml, os
+    yaml_path = tmp_path / "tokengate.yaml"
+    yaml_path.write_text(yaml.dump({
+        "cache": {
+            "exact_ttl_seconds": 3600,
+            "semantic_threshold": 0.95,
+            "max_entries": 1000,
+            "serve_unverified": True,
+            "blocklist_patterns": [r"\btest\b"],
+        }
+    }))
+    os.environ["TOKENGATE_DATA_DIR"] = str(tmp_path)
+    s = Settings(config_path=yaml_path)
+    assert s.cache_exact_ttl == 3600
+    assert s.cache_semantic_threshold == 0.95
+    assert s.cache_max_entries == 1000
+    assert s.cache_serve_unverified is True
+    assert s.cache_blocklist == [r"\btest\b"]

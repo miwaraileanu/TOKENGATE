@@ -47,3 +47,12 @@ class Settings:
         self.db_path: Path = self.data_dir / "tokengate.db"
         self.pid_path: Path = self.data_dir / "tokengate.pid"
         self.log_path: Path = self.data_dir / "logs" / "tokengate.log"
+
+        _c = raw.get("cache", {})
+        self.cache_exact_ttl: int = int(_c.get("exact_ttl_seconds", 86400))
+        self.cache_semantic_threshold: float = float(_c.get("semantic_threshold", 0.93))
+        self.cache_max_entries: int = int(_c.get("max_entries", 50000))
+        self.cache_blocklist: list = list(_c.get("blocklist_patterns", [
+            r"\btoday\b", r"\bnow\b", r"\blatest\b", r"\bprice\b",
+        ]))
+        self.cache_serve_unverified: bool = bool(_c.get("serve_unverified", False))

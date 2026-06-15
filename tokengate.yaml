@@ -17,6 +17,7 @@ cache:
   exact_ttl_seconds: 86400
   semantic_threshold: 0.93
   max_entries: 50000
+  serve_unverified: false
   blocklist_patterns:
     - "\\btoday\\b"
     - "\\bnow\\b"
