@@ -13,9 +13,14 @@ from tokengate.analytics.db import init_db
 
 def make_settings(tmp_path) -> Settings:
     import os
+    old = os.environ.get("TOKENGATE_DATA_DIR")
     os.environ["TOKENGATE_DATA_DIR"] = str(tmp_path)
     s = Settings()
     init_db(s.db_path)
+    if old is None:
+        del os.environ["TOKENGATE_DATA_DIR"]
+    else:
+        os.environ["TOKENGATE_DATA_DIR"] = old
     return s
 
 
@@ -54,9 +59,7 @@ def test_layer_context_has_settings_field():
 
 
 def test_layer_context_settings_can_be_set(tmp_path):
-    import os
-    os.environ["TOKENGATE_DATA_DIR"] = str(tmp_path)
-    s = Settings()
+    s = make_settings(tmp_path)
     req = make_request()
     ctx = LayerContext(request=req, settings=s)
     assert ctx.settings is s
