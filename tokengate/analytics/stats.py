@@ -42,6 +42,21 @@ def get_stats(db_path: Path) -> dict:
         """).fetchall()
     ]
 
+    cache_by_kind = {
+        row["cache_kind"]: {
+            "count": row["cnt"],
+            "saved_usd": row["saved"],
+        }
+        for row in con.execute("""
+            SELECT cache_kind,
+                   COUNT(*) AS cnt,
+                   COALESCE(SUM(est_saved_usd), 0.0) AS saved
+            FROM requests
+            WHERE cache_kind != 'none'
+            GROUP BY cache_kind
+        """).fetchall()
+    }
+
     con.close()
 
     return {
@@ -53,6 +68,7 @@ def get_stats(db_path: Path) -> dict:
         "cache_hit_rate": totals["cache_hit_rate"] or 0.0,
         "requests_by_status": by_status,
         "daily": daily,
+        "cache_by_kind": cache_by_kind,
     }
 
 

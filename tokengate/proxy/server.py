@@ -28,6 +28,17 @@ import tokengate.layers.budgeter as _l_budgeter
 
 _PIPELINE = [_l_exact, _l_semantic, _l_distiller, _l_compressor, _l_router, _l_budgeter]
 
+
+def _determine_cache_kind(decisions: list) -> str:
+    for d in decisions:
+        if d.action == "hit":
+            if d.layer == "exact_cache":
+                return "exact"
+            if d.layer == "semantic_cache":
+                score = d.detail.get("score", 1.0)
+                return "semantic" if score >= 0.97 else "semantic-unverified"
+    return "none"
+
 # Module-level transport override — set in tests via monkeypatch
 _transport: httpx.AsyncBaseTransport | None = None
 _settings: Settings | None = None
@@ -64,6 +75,8 @@ async def lifespan(app: FastAPI):
     check_startup(s)
     s.db_path.parent.mkdir(parents=True, exist_ok=True)
     init_db(s.db_path)
+    if _l_semantic.can_embed():
+        _l_semantic.load_index(s.db_path, s.cache_max_entries)
     yield
 
 
@@ -121,7 +134,7 @@ async def chat_completions(request: Request):
     start_ts = time.time()
     body = await request.json()
     req = normalize_openai(body, dict(request.headers))
-    ctx = LayerContext(request=req)
+    ctx = LayerContext(request=req, settings=s)
     ctx = await _run_pipeline(ctx)
     return await _handle_request(req, ctx, s, start_ts)
 
@@ -132,7 +145,7 @@ async def messages(request: Request):
     start_ts = time.time()
     body = await request.json()
     req = normalize_anthropic(body, dict(request.headers))
-    ctx = LayerContext(request=req)
+    ctx = LayerContext(request=req, settings=s)
     ctx = await _run_pipeline(ctx)
     return await _handle_request(req, ctx, s, start_ts)
 
@@ -150,12 +163,15 @@ async def _non_streaming_response(req, ctx: LayerContext, s: Settings, start_ts:
     tokens_in = tokens_out = 0
     model = req.model
 
+    cache_kind = _determine_cache_kind(ctx.decisions)
+
     if ctx.response is not None:
-        # Pipeline short-circuited (cache hit) — use the cached response
         tokens_in = ctx.response.tokens_in
         tokens_out = ctx.response.tokens_out
         model = ctx.response.model
         resp_body = ctx.response.raw_body
+        est_cost = 0.0
+        est_saved = compute_cost(model, tokens_in, tokens_out, s) or 0.0
     else:
         try:
             upstream_resp = await call_upstream(req, s, transport=_transport)
@@ -163,12 +179,15 @@ async def _non_streaming_response(req, ctx: LayerContext, s: Settings, start_ts:
             tokens_out = upstream_resp.tokens_out
             model = upstream_resp.model
             resp_body = upstream_resp.raw_body
+            for writer in ctx.cache_writers:
+                await writer(upstream_resp)
         except UpstreamError as e:
             status = "upstream_error"
             error_detail = str(e)
             resp_body = e.body
+        est_cost = compute_cost(model, tokens_in, tokens_out, s)
+        est_saved = 0.0
 
-    cost = compute_cost(model, tokens_in, tokens_out, s)
     latency_ms = int((time.time() - start_ts) * 1000)
     write_row(
         s.db_path,
@@ -176,13 +195,17 @@ async def _non_streaming_response(req, ctx: LayerContext, s: Settings, start_ts:
         layers_applied=[asdict(d) for d in ctx.decisions],
         tokens_in_raw=tokens_in or None, tokens_in_final=tokens_in or None,
         tokens_out=tokens_out or None, model_used=model,
-        latency_ms=latency_ms, est_cost_usd=cost,
+        cache_kind=cache_kind,
+        latency_ms=latency_ms,
+        est_cost_usd=est_cost,
+        est_saved_usd=est_saved,
     )
 
+    saved_tokens = (tokens_in + tokens_out) if cache_kind != "none" else 0
     tg_headers = {
-        "x-tokengate-cache": "none",
+        "x-tokengate-cache": cache_kind,
         "x-tokengate-model": model,
-        "x-tokengate-saved-tokens": "0",
+        "x-tokengate-saved-tokens": str(saved_tokens),
     }
     http_status = 200 if status == "ok" else 502
     return JSONResponse(content=resp_body, status_code=http_status, headers=tg_headers)
