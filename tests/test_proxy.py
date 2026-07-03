@@ -512,3 +512,127 @@ def test_budgeter_max_tokens_reaches_router_upstream(tmp_path, monkeypatch):
     _sv._settings = None
     _sv._transport = None
     monkeypatch.setattr(_l_router, "_transport", None)
+
+
+def test_escalated_request_sets_db_flag(tmp_path, monkeypatch):
+    """Escalated request → requests.escalated=1 and est_saved_usd<0 in DB."""
+    import sqlite3
+
+    class _EscalateTransport(_httpx.AsyncBaseTransport):
+        """Call 1 (cheap): real response. Call 2 (check): confidence=2 → escalate. Call 3 (strong): real response."""
+        def __init__(self):
+            self.calls = []
+
+        async def handle_async_request(self, request: _httpx.Request) -> _httpx.Response:
+            body = _json.loads(request.content)
+            self.calls.append(body)
+            idx = len(self.calls)
+            model = body.get("model", "mock")
+            is_ant = "/v1/messages" in str(request.url)
+            text = "2" if idx == 2 else ("Strong response" if idx == 3 else "Cheap response")
+            tokens_out = 1 if idx == 2 else 2
+            if is_ant:
+                resp = {
+                    "id": "msg_mock", "type": "message", "role": "assistant",
+                    "content": [{"type": "text", "text": text}], "model": model,
+                    "stop_reason": "end_turn", "usage": {"input_tokens": 10, "output_tokens": tokens_out},
+                }
+            else:
+                resp = {
+                    "id": "chatcmpl-mock", "object": "chat.completion",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+                    "model": model,
+                    "usage": {"prompt_tokens": 10, "completion_tokens": tokens_out, "total_tokens": 10 + tokens_out},
+                }
+            return _httpx.Response(200, json=resp)
+
+    monkeypatch.setenv("TOKENGATE_DATA_DIR", str(tmp_path))
+    _sv._settings = None
+    s = Settings()
+    s.router_difficulty_threshold = 1.1  # force cheap path (score never reaches 1.1)
+    _sv._settings = s
+    init_db(s.db_path)
+
+    transport = _EscalateTransport()
+    monkeypatch.setattr(_sv, "_transport", transport)
+    monkeypatch.setattr(_l_router, "_transport", transport)
+
+    with TestClient(_sv.app, raise_server_exceptions=True) as client:
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4o", "messages": [{"role": "user", "content": "what is two plus two?"}]},
+        )
+
+    assert resp.status_code == 200
+    con = sqlite3.connect(s.db_path)
+    con.row_factory = sqlite3.Row
+    row = dict(con.execute("SELECT escalated, est_saved_usd FROM requests WHERE status='ok'").fetchone())
+    con.close()
+    assert row["escalated"] == 1
+    assert row["est_saved_usd"] < 0
+
+    _sv._settings = None
+    _sv._transport = None
+    monkeypatch.setattr(_l_router, "_transport", None)
+
+
+def test_non_escalated_cheap_positive_savings(tmp_path, monkeypatch):
+    """Non-escalated cheap routing → escalated=0 and est_saved_usd>0 in DB."""
+    import sqlite3
+
+    class _CheapTransport(_httpx.AsyncBaseTransport):
+        """Call 1 (cheap): real response. Call 2 (check): confidence=5 → no escalation."""
+        def __init__(self):
+            self.calls = []
+
+        async def handle_async_request(self, request: _httpx.Request) -> _httpx.Response:
+            body = _json.loads(request.content)
+            self.calls.append(body)
+            idx = len(self.calls)
+            model = body.get("model", "mock")
+            is_ant = "/v1/messages" in str(request.url)
+            text = "5" if idx == 2 else "Cheap response"
+            tokens_out = 1 if idx == 2 else 2
+            if is_ant:
+                resp = {
+                    "id": "msg_mock", "type": "message", "role": "assistant",
+                    "content": [{"type": "text", "text": text}], "model": model,
+                    "stop_reason": "end_turn", "usage": {"input_tokens": 10, "output_tokens": tokens_out},
+                }
+            else:
+                resp = {
+                    "id": "chatcmpl-mock", "object": "chat.completion",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+                    "model": model,
+                    "usage": {"prompt_tokens": 10, "completion_tokens": tokens_out, "total_tokens": 10 + tokens_out},
+                }
+            return _httpx.Response(200, json=resp)
+
+    monkeypatch.setenv("TOKENGATE_DATA_DIR", str(tmp_path))
+    _sv._settings = None
+    s = Settings()
+    s.router_difficulty_threshold = 1.1  # force cheap path
+    _sv._settings = s
+    init_db(s.db_path)
+
+    transport = _CheapTransport()
+    monkeypatch.setattr(_sv, "_transport", transport)
+    monkeypatch.setattr(_l_router, "_transport", transport)
+
+    with TestClient(_sv.app, raise_server_exceptions=True) as client:
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4o", "messages": [{"role": "user", "content": "what is the capital of France?"}]},
+        )
+
+    assert resp.status_code == 200
+    con = sqlite3.connect(s.db_path)
+    con.row_factory = sqlite3.Row
+    row = dict(con.execute("SELECT escalated, est_saved_usd FROM requests WHERE status='ok'").fetchone())
+    con.close()
+    assert row["escalated"] == 0
+    assert row["est_saved_usd"] > 0
+
+    _sv._settings = None
+    _sv._transport = None
+    monkeypatch.setattr(_l_router, "_transport", None)
