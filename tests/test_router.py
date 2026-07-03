@@ -186,7 +186,7 @@ def test_difficulty_no_multi_step(tmp_path):
 
 def test_difficulty_depth_feature(tmp_path):
     s = make_settings(tmp_path)
-    # 10 non-system turns → min(10/20, 0.10) = 0.05
+    # 10 non-system turns → min(10/200, 0.10) = 0.05
     messages = [
         {"role": "user" if i % 2 == 0 else "assistant", "content": "msg"}
         for i in range(10)
