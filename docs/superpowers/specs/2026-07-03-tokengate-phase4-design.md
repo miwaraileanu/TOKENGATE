@@ -99,7 +99,7 @@ Pure heuristics in Phase 4. Score is a `float` in `[0.0, 1.0]`:
 | Fenced code block in user messages | `+0.15` | Code tasks often require precision |
 | Math symbols (`∑∫√±×÷=∂` or `\b(sin\|cos\|integral\|derivative)\b`) | `+0.10` | Math → strong reasoning needed |
 | Multi-step markers (`step \d`, `^\d+\.` numbered lists, or `\bthen\b` adjacent to imperative verbs) | `+0.10` | Sequential reasoning harder |
-| Conversation depth (non-system turns) | `min(turns / 20, 0.10)` | Deep context increases complexity |
+| Conversation depth (non-system turns) | `min(turns / 200, 0.10)` | Deep context increases complexity (20 turns = max 0.10 contribution) |
 
 **Sum clamped to `[0.0, 1.0]`.**
 
