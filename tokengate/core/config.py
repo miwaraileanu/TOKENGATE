@@ -86,3 +86,20 @@ class Settings:
             "code": self.budget_code,
             "long_form": self.budget_long_form,
         }
+
+        _r = raw.get("router", {})
+        self.router_enabled: bool = bool(_r.get("enabled", True))
+        self.router_difficulty_threshold: float = float(_r.get("difficulty_threshold", 0.4))
+        self.router_escalation_enabled: bool = bool(_r.get("escalation_enabled", True))
+        self.router_escalation_threshold: int = int(_r.get("escalation_threshold", 3))
+        self.router_tools_tier: str = _r.get("tools_tier", "strong")
+        _cm = _r.get("cheap_model", {})
+        self.router_cheap_model: dict[str, str] = {
+            "anthropic": _cm.get("anthropic", "claude-haiku-4-5"),
+            "openai": _cm.get("openai", "gpt-4o-mini"),
+        }
+        _sm = _r.get("strong_model", {})
+        self.router_strong_model: dict[str, str] = {
+            "anthropic": _sm.get("anthropic", "claude-sonnet-4-6"),
+            "openai": _sm.get("openai", "gpt-4o"),
+        }
