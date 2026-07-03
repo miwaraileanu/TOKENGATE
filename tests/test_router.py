@@ -7,9 +7,14 @@ from tokengate.analytics.db import init_db
 
 
 def make_settings(tmp_path) -> Settings:
+    old = os.environ.get("TOKENGATE_DATA_DIR")
     os.environ["TOKENGATE_DATA_DIR"] = str(tmp_path)
     s = Settings()
     init_db(s.db_path)
+    if old is None:
+        os.environ.pop("TOKENGATE_DATA_DIR", None)
+    else:
+        os.environ["TOKENGATE_DATA_DIR"] = old
     return s
 
 
