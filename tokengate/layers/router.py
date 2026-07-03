@@ -153,5 +153,101 @@ async def apply(ctx: LayerContext) -> LayerContext:
         }))
         return ctx
 
-    # 6. Cheap path — implemented in Task 6
+    # 6. Cheap path
+    cheap_resp = await call_upstream(_call_model(req, cheap_model), settings, transport=_transport)
+
+    cheap_cost = compute_cost(cheap_model, cheap_resp.tokens_in, cheap_resp.tokens_out, settings) or 0.0
+
+    # 7. Self-check (escalation check)
+    escalated = False
+    confidence_score: Optional[int] = None
+    escalation_reason: Optional[str] = None
+
+    if settings.router_escalation_enabled:
+        last_user = ""
+        for m in reversed(req.messages):
+            if m.get("role") == "user":
+                content = m.get("content", "")
+                last_user = content[:500] if isinstance(content, str) else ""
+                break
+
+        check_prompt = (
+            "Does this response fully and correctly answer the question below?\n"
+            "Rate your confidence 1 (not at all) to 5 (completely).\n"
+            "Reply with exactly one digit and nothing else.\n\n"
+            f"Question: {last_user}\n"
+            f"Response: {cheap_resp.content[:1000]}"
+        )
+        check_req = GatewayRequest(
+            messages=[{"role": "user", "content": check_prompt}],
+            model=cheap_model,
+            stream=False,
+            max_tokens=5,
+            temperature=0,
+            tools=[],
+            route=req.route,
+            raw_headers=req.raw_headers,
+            extra={},
+        )
+
+        try:
+            check_resp = await call_upstream(check_req, settings, transport=_transport)
+            raw_digit = check_resp.content.strip()
+            if raw_digit in {"1", "2", "3", "4", "5"}:
+                confidence_score = int(raw_digit)
+                if confidence_score <= settings.router_escalation_threshold:
+                    escalated = True
+                    escalation_reason = "low_confidence"
+            else:
+                escalated = True
+                escalation_reason = "check_parse_failed"
+            check_cost = compute_cost(cheap_model, check_resp.tokens_in, check_resp.tokens_out, settings) or 0.0
+        except UpstreamError:
+            escalated = True
+            escalation_reason = "check_call_failed"
+            check_cost = 0.0
+    else:
+        check_cost = 0.0
+
+    # 8. Escalation: call strong model
+    if escalated:
+        try:
+            strong_resp = await call_upstream(_call_model(req, strong_model), settings, transport=_transport)
+            served_resp = strong_resp
+            strong_cost = compute_cost(strong_model, strong_resp.tokens_in, strong_resp.tokens_out, settings) or 0.0
+        except UpstreamError:
+            # Strong failed — serve cheap (better than a 500)
+            served_resp = cheap_resp
+            strong_cost = 0.0
+            escalation_reason = "escalation_failed_served_cheap"
+    else:
+        served_resp = cheap_resp
+        strong_cost = 0.0
+
+    ctx.response = served_resp
+
+    # 9. Cost accounting
+    baseline_cost = compute_cost(
+        strong_model,
+        served_resp.tokens_in,
+        served_resp.tokens_out,
+        settings,
+    ) or 0.0
+    est_cost = cheap_cost + check_cost + strong_cost
+    est_saved = baseline_cost - est_cost
+
+    ctx.decisions.append(LayerDecision("router", "applied", {
+        "difficulty": difficulty,
+        "features": features,
+        "tier": "cheap",
+        "model": served_resp.model,
+        "reason": reason,
+        "escalated": escalated,
+        "confidence_score": confidence_score,
+        "escalation_reason": escalation_reason,
+        "est_cost_usd": est_cost,
+        "baseline_cost_usd": baseline_cost,
+        "baseline_is_estimate": True,
+        "est_saved_usd": est_saved,
+    }))
     return ctx

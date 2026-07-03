@@ -136,7 +136,12 @@ async def chat_completions(request: Request):
     body = await request.json()
     req = normalize_openai(body, dict(request.headers))
     ctx = LayerContext(request=req, settings=s)
-    ctx = await _run_pipeline(ctx)
+    try:
+        ctx = await _run_pipeline(ctx)
+    except UpstreamError:
+        # Pipeline layer (e.g. router) raised before setting ctx.response;
+        # fall through to _handle_request which will call upstream itself.
+        pass
     return await _handle_request(req, ctx, s, start_ts)
 
 
@@ -147,7 +152,12 @@ async def messages(request: Request):
     body = await request.json()
     req = normalize_anthropic(body, dict(request.headers))
     ctx = LayerContext(request=req, settings=s)
-    ctx = await _run_pipeline(ctx)
+    try:
+        ctx = await _run_pipeline(ctx)
+    except UpstreamError:
+        # Pipeline layer (e.g. router) raised before setting ctx.response;
+        # fall through to _handle_request which will call upstream itself.
+        pass
     return await _handle_request(req, ctx, s, start_ts)
 
 
@@ -180,6 +190,9 @@ async def _non_streaming_response(req, ctx: LayerContext, s: Settings, start_ts:
             est_cost = router_decision.detail["est_cost_usd"]
             est_saved = router_decision.detail["est_saved_usd"]
             escalated = int(router_decision.detail["escalated"])
+            # Populate cache with the router's response
+            for writer in ctx.cache_writers:
+                await writer(ctx.response)
         else:
             # cache hit — no router decision
             est_cost = 0.0

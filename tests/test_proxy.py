@@ -86,10 +86,12 @@ def test_client(tmp_path, monkeypatch):
     init_db(s.db_path)
     transport = MockTransport()
     monkeypatch.setattr(_sv, "_transport", transport)
+    monkeypatch.setattr(_l_router, "_transport", transport)
     with TestClient(_sv.app, raise_server_exceptions=True) as c:
         yield c, transport, s
     _sv._settings = None
     _sv._transport = None
+    monkeypatch.setattr(_l_router, "_transport", None)
 
 
 def test_openai_endpoint_returns_200(test_client):
@@ -145,7 +147,9 @@ def test_analytics_row_written_on_success(test_client):
 def test_analytics_row_on_upstream_error(test_client, monkeypatch):
     import sqlite3
     client, _, s = test_client
-    monkeypatch.setattr(_sv, "_transport", MockTransport(mode="error", error_status=500))
+    error_transport = MockTransport(mode="error", error_status=500)
+    monkeypatch.setattr(_sv, "_transport", error_transport)
+    monkeypatch.setattr(_l_router, "_transport", error_transport)
     resp = client.post("/v1/chat/completions",
                        json={"model": "gpt-4o", "messages": []},
                        headers={"accept": "application/json"})
@@ -213,6 +217,7 @@ def test_distiller_fires_on_long_history(tmp_path, monkeypatch):
     summary_transport = _SummaryTransport()
     monkeypatch.setattr(_sv, "_transport", summary_transport)
     monkeypatch.setattr(_l_distiller, "_transport", summary_transport)
+    monkeypatch.setattr(_l_router, "_transport", summary_transport)
 
     # Build a long message list
     messages = [{"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 200} for i in range(10)]
@@ -239,6 +244,7 @@ def test_distiller_fires_on_long_history(tmp_path, monkeypatch):
     _sv._settings = None
     _sv._transport = None
     monkeypatch.setattr(_l_distiller, "_transport", None)
+    monkeypatch.setattr(_l_router, "_transport", None)
 
 
 def test_distiller_failsafe_preserves_original_history(tmp_path, monkeypatch):
@@ -262,6 +268,7 @@ def test_distiller_failsafe_preserves_original_history(tmp_path, monkeypatch):
     fail_transport = _FailTransport()
     monkeypatch.setattr(_sv, "_transport", fail_transport)
     monkeypatch.setattr(_l_distiller, "_transport", fail_transport)
+    monkeypatch.setattr(_l_router, "_transport", fail_transport)
 
     messages = [
         {"role": "user", "content": "x" * 200},
@@ -290,6 +297,7 @@ def test_distiller_failsafe_preserves_original_history(tmp_path, monkeypatch):
     _sv._settings = None
     _sv._transport = None
     monkeypatch.setattr(_l_distiller, "_transport", None)
+    monkeypatch.setattr(_l_router, "_transport", None)
 
 
 def test_budgeter_injects_max_tokens_on_uncapped_request(tmp_path, monkeypatch):
@@ -303,6 +311,7 @@ def test_budgeter_injects_max_tokens_on_uncapped_request(tmp_path, monkeypatch):
 
     normal_transport = MockTransport()
     monkeypatch.setattr(_sv, "_transport", normal_transport)
+    monkeypatch.setattr(_l_router, "_transport", normal_transport)
 
     with TestClient(_sv.app, raise_server_exceptions=True) as client:
         resp = client.post(
@@ -322,6 +331,7 @@ def test_budgeter_injects_max_tokens_on_uncapped_request(tmp_path, monkeypatch):
 
     _sv._settings = None
     _sv._transport = None
+    monkeypatch.setattr(_l_router, "_transport", None)
 
 
 def test_distiller_tokens_in_raw_recorded(tmp_path, monkeypatch):
@@ -338,6 +348,7 @@ def test_distiller_tokens_in_raw_recorded(tmp_path, monkeypatch):
     summary_transport = _SummaryTransport()
     monkeypatch.setattr(_sv, "_transport", summary_transport)
     monkeypatch.setattr(_l_distiller, "_transport", summary_transport)
+    monkeypatch.setattr(_l_router, "_transport", summary_transport)
 
     messages = [
         {"role": "user", "content": "a" * 300},
@@ -368,14 +379,18 @@ def test_distiller_tokens_in_raw_recorded(tmp_path, monkeypatch):
     _sv._settings = None
     _sv._transport = None
     monkeypatch.setattr(_l_distiller, "_transport", None)
+    monkeypatch.setattr(_l_router, "_transport", None)
 
 
 def test_budgeter_est_saved_usd_zero(tmp_path, monkeypatch):
-    """Budgeter contributes 0 to est_saved_usd (output savings unmeasurable)."""
+    """Budgeter contributes 0 to est_saved_usd (output savings unmeasurable).
+    Router is disabled so that est_saved_usd in the DB row reflects only the
+    budgeter+server-fallback path (no router cost accounting)."""
     import sqlite3
     monkeypatch.setenv("TOKENGATE_DATA_DIR", str(tmp_path))
     _sv._settings = None
     s = Settings()
+    s.router_enabled = False  # isolate budgeter; router contributes its own savings
     _sv._settings = s
     init_db(s.db_path)
 
@@ -399,7 +414,7 @@ def test_budgeter_est_saved_usd_zero(tmp_path, monkeypatch):
     layers = _json.loads(row["layers_applied"])
     budgeter_decisions = [l for l in layers if l["layer"] == "budgeter" and l["action"] == "applied"]
     assert budgeter_decisions, "budgeter should have applied"
-    # est_saved_usd for non-cache requests is always 0
+    # est_saved_usd for non-cache, non-router requests is always 0
     assert row["est_saved_usd"] == 0.0
 
     _sv._settings = None
@@ -443,11 +458,6 @@ def test_pipeline_order_budgeter_before_router(tmp_path, monkeypatch):
     _sv._transport = None
 
 
-@pytest.mark.xfail(
-    reason="router stub does not fire 'applied' decisions until Task 6; "
-           "remove xfail after Task 6 and verify passes with router making the call",
-    strict=False,
-)
 def test_budgeter_max_tokens_reaches_router_upstream(tmp_path, monkeypatch):
     """Budgeter's injected max_tokens is present in the upstream call the router
     makes. Both _sv._transport and _l_router._transport are patched to the same

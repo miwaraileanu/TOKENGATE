@@ -509,20 +509,24 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def cache_client(tmp_path, monkeypatch):
+    import tokengate.layers.router as _l_router
     monkeypatch.setenv("TOKENGATE_DATA_DIR", str(tmp_path))
     _sv._settings = None
     s = Settings()
     s.prices["mock"] = (1.0, 5.0)   # give mock model a price → est_saved_usd > 0
+    s.router_escalation_enabled = False  # keep router to 1 upstream call so transport.requests count is predictable
     _sv._settings = s
     init_db(s.db_path)
     transport = MockTransport()
     monkeypatch.setattr(_sv, "_transport", transport)
+    monkeypatch.setattr(_l_router, "_transport", transport)
     sem_cache._index.clear()
     sem_cache.set_embedder(None)
     with TestClient(_sv.app, raise_server_exceptions=True) as c:
         yield c, transport, s
     _sv._settings = None
     _sv._transport = None
+    monkeypatch.setattr(_l_router, "_transport", None)
     sem_cache._index.clear()
     sem_cache.set_embedder(None)
 

@@ -359,3 +359,219 @@ async def test_decision_schema_strong_direct(tmp_path):
         assert isinstance(d.detail["est_saved_usd"], float)
     finally:
         _router.set_transport(None)
+
+
+class _ConfidenceTransport(httpx.AsyncBaseTransport):
+    """
+    Simulates cheap → self-check → optional strong cascade.
+    call 1: cheap model → 'Mock response'
+    call 2: self-check → confidence digit (or 'excellent' for parse-fail test)
+    call 3: strong model → 'Strong response' (or 500 if strong_fail=True)
+    """
+
+    def __init__(self, confidence: str = "4", strong_fail: bool = False):
+        self.confidence = confidence
+        self.strong_fail = strong_fail
+        self.calls: list[dict] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        import json as _json
+        body = _json.loads(request.content)
+        self.calls.append(body)
+        call_index = len(self.calls)
+        is_ant = "/v1/messages" in str(request.url)
+        model = body.get("model", "mock")
+
+        if call_index == 3:
+            if self.strong_fail:
+                err = _json.dumps({"error": {"message": "strong fail", "type": "server_error"}})
+                return httpx.Response(500, content=err.encode(), headers={"content-type": "application/json"})
+            text = "Strong response"
+        elif call_index == 2:
+            text = self.confidence
+        else:
+            text = "Mock response"
+
+        tokens_out = len(text.split())
+        if is_ant:
+            resp = {
+                "id": "msg_mock", "type": "message", "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+                "model": model, "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": tokens_out},
+            }
+        else:
+            resp = {
+                "id": "chatcmpl-mock", "object": "chat.completion",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+                "model": model,
+                "usage": {"prompt_tokens": 10, "completion_tokens": tokens_out, "total_tokens": 10 + tokens_out},
+            }
+        return httpx.Response(200, json=resp)
+
+
+@pytest.mark.asyncio
+async def test_cheap_high_confidence_served(tmp_path):
+    """Confidence=4 (>threshold=3) → serve cheap, est_saved_usd > 0."""
+    s = make_settings(tmp_path)
+    transport = _ConfidenceTransport(confidence="4")
+    _router.set_transport(transport)
+    try:
+        req = make_req()
+        ctx = make_ctx(req, s)
+        result = await _router.apply(ctx)
+        applied = next(d for d in result.decisions if d.layer == "router" and d.action == "applied")
+        assert applied.detail["tier"] == "cheap"
+        assert applied.detail["escalated"] is False
+        assert applied.detail["confidence_score"] == 4
+        assert applied.detail["est_saved_usd"] > 0
+        assert result.response is not None
+        assert result.response.content == "Mock response"
+        assert len(transport.calls) == 2  # cheap + check
+    finally:
+        _router.set_transport(None)
+
+
+@pytest.mark.asyncio
+async def test_cheap_low_confidence_escalates(tmp_path):
+    """Confidence=2 (<=threshold=3) → escalate to strong, est_saved_usd < 0."""
+    s = make_settings(tmp_path)
+    transport = _ConfidenceTransport(confidence="2")
+    _router.set_transport(transport)
+    try:
+        req = make_req()
+        ctx = make_ctx(req, s)
+        result = await _router.apply(ctx)
+        applied = next(d for d in result.decisions if d.layer == "router" and d.action == "applied")
+        assert applied.detail["tier"] == "cheap"
+        assert applied.detail["escalated"] is True
+        assert applied.detail["confidence_score"] == 2
+        assert applied.detail["escalation_reason"] == "low_confidence"
+        assert applied.detail["est_saved_usd"] < 0
+        assert result.response.content == "Strong response"
+        assert len(transport.calls) == 3  # cheap + check + strong
+    finally:
+        _router.set_transport(None)
+
+
+@pytest.mark.asyncio
+async def test_self_check_call_fails_escalates(tmp_path):
+    """Self-check 500 → escalate, reason=check_call_failed."""
+    s = make_settings(tmp_path)
+
+    class _CheckFailTransport(httpx.AsyncBaseTransport):
+        def __init__(self):
+            self.calls = []
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            import json as _j
+            body = _j.loads(request.content)
+            self.calls.append(body)
+            call_index = len(self.calls)
+            model = body.get("model", "mock")
+            is_ant = "/v1/messages" in str(request.url)
+            if call_index == 2:  # self-check fails
+                err = _j.dumps({"error": {"message": "fail", "type": "server_error"}})
+                return httpx.Response(500, content=err.encode(), headers={"content-type": "application/json"})
+            text = "Mock response" if call_index == 1 else "Strong response"
+            tokens_out = len(text.split())
+            if is_ant:
+                resp = {
+                    "id": "msg_mock", "type": "message", "role": "assistant",
+                    "content": [{"type": "text", "text": text}], "model": model,
+                    "stop_reason": "end_turn", "usage": {"input_tokens": 10, "output_tokens": tokens_out},
+                }
+            else:
+                resp = {
+                    "id": "chatcmpl-mock", "object": "chat.completion",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+                    "model": model, "usage": {"prompt_tokens": 10, "completion_tokens": tokens_out, "total_tokens": 10 + tokens_out},
+                }
+            return httpx.Response(200, json=resp)
+
+    transport = _CheckFailTransport()
+    _router.set_transport(transport)
+    try:
+        req = make_req()
+        ctx = make_ctx(req, s)
+        result = await _router.apply(ctx)
+        applied = next(d for d in result.decisions if d.layer == "router" and d.action == "applied")
+        assert applied.detail["escalated"] is True
+        assert applied.detail["escalation_reason"] == "check_call_failed"
+    finally:
+        _router.set_transport(None)
+
+
+@pytest.mark.asyncio
+async def test_self_check_parse_fails_escalates(tmp_path):
+    """Self-check returns non-digit → escalate, reason=check_parse_failed."""
+    s = make_settings(tmp_path)
+    transport = _ConfidenceTransport(confidence="excellent")
+    _router.set_transport(transport)
+    try:
+        req = make_req()
+        ctx = make_ctx(req, s)
+        result = await _router.apply(ctx)
+        applied = next(d for d in result.decisions if d.layer == "router" and d.action == "applied")
+        assert applied.detail["escalated"] is True
+        assert applied.detail["escalation_reason"] == "check_parse_failed"
+    finally:
+        _router.set_transport(None)
+
+
+@pytest.mark.asyncio
+async def test_escalation_strong_fails_serves_cheap(tmp_path):
+    """Strong fails after escalation → serve cheap response, reason=escalation_failed_served_cheap."""
+    s = make_settings(tmp_path)
+    transport = _ConfidenceTransport(confidence="2", strong_fail=True)
+    _router.set_transport(transport)
+    try:
+        req = make_req()
+        ctx = make_ctx(req, s)
+        result = await _router.apply(ctx)
+        applied = next(d for d in result.decisions if d.layer == "router" and d.action == "applied")
+        assert applied.detail["escalated"] is True
+        assert applied.detail["escalation_reason"] == "escalation_failed_served_cheap"
+        assert result.response.content == "Mock response"
+    finally:
+        _router.set_transport(None)
+
+
+@pytest.mark.asyncio
+async def test_both_fail_propagates_upstream_error(tmp_path):
+    """Cheap upstream fails → UpstreamError propagates (nothing to serve)."""
+    from tokengate.core.provider import UpstreamError as _UE
+    s = make_settings(tmp_path)
+
+    class _AlwaysErrorTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            import json as _j
+            err = _j.dumps({"error": {"message": "fail", "type": "server_error"}})
+            return httpx.Response(500, content=err.encode(), headers={"content-type": "application/json"})
+
+    _router.set_transport(_AlwaysErrorTransport())
+    try:
+        req = make_req()
+        ctx = make_ctx(req, s)
+        with pytest.raises(_UE):
+            await _router.apply(ctx)
+    finally:
+        _router.set_transport(None)
+
+
+@pytest.mark.asyncio
+async def test_self_check_call_params(tmp_path):
+    """Self-check call must use max_tokens=5 and temperature=0 with the cheap model."""
+    s = make_settings(tmp_path)
+    transport = _ConfidenceTransport(confidence="4")
+    _router.set_transport(transport)
+    try:
+        req = make_req()
+        ctx = make_ctx(req, s)
+        await _router.apply(ctx)
+        check_call = transport.calls[1]  # second call is the self-check
+        assert check_call.get("max_tokens") == 5
+        assert check_call.get("temperature") == 0
+        assert check_call.get("model") == s.router_cheap_model["openai"]
+    finally:
+        _router.set_transport(None)
