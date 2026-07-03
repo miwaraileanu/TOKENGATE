@@ -441,3 +441,39 @@ def test_pipeline_order_budgeter_before_router(tmp_path, monkeypatch):
 
     _sv._settings = None
     _sv._transport = None
+
+
+def test_budgeter_max_tokens_reaches_router_upstream(tmp_path, monkeypatch):
+    """Budgeter's injected max_tokens is present in the upstream call the router
+    makes. Both _sv._transport and _l_router._transport are patched to the same
+    MockTransport — the call is captured whether made by the router (after Task 6)
+    or by the server fallback (current stub). router_escalation_enabled=False
+    keeps it to a single upstream call so transport.requests[0] is unambiguous."""
+    monkeypatch.setenv("TOKENGATE_DATA_DIR", str(tmp_path))
+    _sv._settings = None
+    s = Settings()
+    s.router_escalation_enabled = False  # single call; no self-check noise
+    _sv._settings = s
+    init_db(s.db_path)
+
+    transport = MockTransport()
+    monkeypatch.setattr(_sv, "_transport", transport)
+    monkeypatch.setattr(_l_router, "_transport", transport)
+
+    with TestClient(_sv.app, raise_server_exceptions=True) as client:
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "explain the difference between TCP and UDP in networking protocols"}],
+                # No max_tokens — budgeter must inject 1024 before any upstream call
+            },
+        )
+
+    assert resp.status_code == 200
+    # First upstream call (cheap model via router, or server fallback) carries budgeter's max_tokens
+    assert transport.requests[0].get("max_tokens") == 1024
+
+    _sv._settings = None
+    _sv._transport = None
+    monkeypatch.setattr(_l_router, "_transport", None)
