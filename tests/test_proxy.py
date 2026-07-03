@@ -404,3 +404,40 @@ def test_budgeter_est_saved_usd_zero(tmp_path, monkeypatch):
 
     _sv._settings = None
     _sv._transport = None
+
+
+# ── Phase 4 integration tests ─────────────────────────────────────────────────
+
+import tokengate.layers.router as _l_router
+
+
+def test_pipeline_order_budgeter_before_router(tmp_path, monkeypatch):
+    """Budgeter's max_tokens injection reaches upstream before any call is made.
+    Uses router_enabled=False so the server fallback fires — proving budgeter
+    ran before any upstream call regardless of which code path makes it."""
+    import sqlite3
+    monkeypatch.setenv("TOKENGATE_DATA_DIR", str(tmp_path))
+    _sv._settings = None
+    s = Settings()
+    s.router_enabled = False
+    _sv._settings = s
+    init_db(s.db_path)
+
+    transport = MockTransport()
+    monkeypatch.setattr(_sv, "_transport", transport)
+
+    with TestClient(_sv.app, raise_server_exceptions=True) as client:
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "explain the key difference between TCP and UDP in networking"}],
+                # No max_tokens — budgeter should inject 1024
+            },
+        )
+
+    assert resp.status_code == 200
+    assert transport.requests[-1].get("max_tokens") == 1024
+
+    _sv._settings = None
+    _sv._transport = None

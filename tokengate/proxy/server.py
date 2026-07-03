@@ -26,7 +26,7 @@ import tokengate.layers.router as _l_router
 import tokengate.layers.budgeter as _l_budgeter
 
 
-_PIPELINE = [_l_exact, _l_semantic, _l_distiller, _l_compressor, _l_router, _l_budgeter]
+_PIPELINE = [_l_exact, _l_semantic, _l_distiller, _l_compressor, _l_budgeter, _l_router]
 
 
 def _determine_cache_kind(decisions: list) -> str:
@@ -171,8 +171,20 @@ async def _non_streaming_response(req, ctx: LayerContext, s: Settings, start_ts:
         tokens_out = ctx.response.tokens_out
         model = ctx.response.model
         resp_body = ctx.response.raw_body
-        est_cost = 0.0
-        est_saved = compute_cost(model, tokens_in, tokens_out, s) or 0.0
+
+        router_decision = next(
+            (d for d in ctx.decisions if d.layer == "router" and d.action == "applied"),
+            None,
+        )
+        if router_decision:
+            est_cost = router_decision.detail["est_cost_usd"]
+            est_saved = router_decision.detail["est_saved_usd"]
+            escalated = int(router_decision.detail["escalated"])
+        else:
+            # cache hit — no router decision
+            est_cost = 0.0
+            est_saved = compute_cost(model, tokens_in, tokens_out, s) or 0.0
+            escalated = 0
     else:
         try:
             upstream_resp = await call_upstream(req, s, transport=_transport)
@@ -188,6 +200,7 @@ async def _non_streaming_response(req, ctx: LayerContext, s: Settings, start_ts:
             resp_body = e.body
         est_cost = compute_cost(model, tokens_in, tokens_out, s)
         est_saved = 0.0
+        escalated = 0
 
     # tokens_in_raw: pre-distillation count from distiller decision, else actual
     tokens_in_raw = next(
@@ -204,6 +217,7 @@ async def _non_streaming_response(req, ctx: LayerContext, s: Settings, start_ts:
         tokens_in_raw=tokens_in_raw, tokens_in_final=tokens_in or None,
         tokens_out=tokens_out or None, model_used=model,
         cache_kind=cache_kind,
+        escalated=escalated,
         latency_ms=latency_ms,
         est_cost_usd=est_cost,
         est_saved_usd=est_saved,
