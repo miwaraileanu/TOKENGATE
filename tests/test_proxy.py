@@ -443,12 +443,22 @@ def test_pipeline_order_budgeter_before_router(tmp_path, monkeypatch):
     _sv._transport = None
 
 
+@pytest.mark.xfail(
+    reason="router stub does not fire 'applied' decisions until Task 6; "
+           "remove xfail after Task 6 and verify passes with router making the call",
+    strict=False,
+)
 def test_budgeter_max_tokens_reaches_router_upstream(tmp_path, monkeypatch):
     """Budgeter's injected max_tokens is present in the upstream call the router
     makes. Both _sv._transport and _l_router._transport are patched to the same
     MockTransport — the call is captured whether made by the router (after Task 6)
     or by the server fallback (current stub). router_escalation_enabled=False
-    keeps it to a single upstream call so transport.requests[0] is unambiguous."""
+    keeps it to a single upstream call so transport.requests[0] is unambiguous.
+
+    The router-decision assertion ensures this cannot silently pass via the server
+    fallback: the router must have an 'applied' decision with a tier in its detail.
+    """
+    import sqlite3
     monkeypatch.setenv("TOKENGATE_DATA_DIR", str(tmp_path))
     _sv._settings = None
     s = Settings()
@@ -471,8 +481,23 @@ def test_budgeter_max_tokens_reaches_router_upstream(tmp_path, monkeypatch):
         )
 
     assert resp.status_code == 200
-    # First upstream call (cheap model via router, or server fallback) carries budgeter's max_tokens
+    # First upstream call carries budgeter's max_tokens regardless of who made it
     assert transport.requests[0].get("max_tokens") == 1024
+
+    # Proof the ROUTER made the call, not the server fallback
+    con = sqlite3.connect(s.db_path)
+    row = con.execute("SELECT layers_applied FROM requests WHERE status='ok'").fetchone()
+    con.close()
+    layers = _json.loads(row[0])
+    router_applied = next(
+        (l for l in layers if l["layer"] == "router" and l["action"] == "applied"),
+        None,
+    )
+    assert router_applied is not None, (
+        "router did not fire an 'applied' decision — max_tokens may have reached "
+        "the server fallback, not the router's own upstream call"
+    )
+    assert "tier" in router_applied["detail"], "router applied decision missing 'tier' key"
 
     _sv._settings = None
     _sv._transport = None
