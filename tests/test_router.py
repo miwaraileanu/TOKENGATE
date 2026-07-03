@@ -226,3 +226,136 @@ def test_difficulty_returns_all_feature_keys(tmp_path):
     req = make_req_with_content("hello world")
     score, features = _score_difficulty(req, s)
     assert set(features.keys()) == {"length", "tools", "code", "math", "multi_step", "depth"}
+
+
+class _RecordTransport(httpx.AsyncBaseTransport):
+    """Records model used per call; returns a valid 1-token mock response."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        import json as _j
+        body = _j.loads(request.content)
+        self.calls.append(body)
+        model = body.get("model", "mock")
+        is_ant = "/v1/messages" in str(request.url)
+        if is_ant:
+            resp = {
+                "id": "msg_mock", "type": "message", "role": "assistant",
+                "content": [{"type": "text", "text": "4"}],
+                "model": model, "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 1},
+            }
+        else:
+            resp = {
+                "id": "chatcmpl-mock", "object": "chat.completion",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "4"}, "finish_reason": "stop"}],
+                "model": model,
+                "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+            }
+        return httpx.Response(200, json=resp)
+
+
+@pytest.mark.asyncio
+async def test_client_override_strong(tmp_path):
+    """x-tokengate-tier: strong header forces strong model, no self-check."""
+    s = make_settings(tmp_path)
+    transport = _RecordTransport()
+    _router.set_transport(transport)
+    try:
+        req = make_req(raw_headers={"x-tokengate-tier": "strong"})
+        ctx = make_ctx(req, s)
+        result = await _router.apply(ctx)
+        applied = next(d for d in result.decisions if d.layer == "router" and d.action == "applied")
+        assert applied.detail["tier"] == "strong"
+        assert applied.detail["reason"] == "client_override"
+        assert applied.detail["escalated"] is False
+        assert applied.detail["confidence_score"] is None
+        assert len(transport.calls) == 1
+        assert transport.calls[0]["model"] == s.router_strong_model["openai"]
+    finally:
+        _router.set_transport(None)
+
+
+@pytest.mark.asyncio
+async def test_tools_forced_strong(tmp_path):
+    """tools present + tools_tier=strong → strong model, reason=tools_forced_strong."""
+    s = make_settings(tmp_path)
+    s.router_tools_tier = "strong"
+    transport = _RecordTransport()
+    _router.set_transport(transport)
+    try:
+        req = make_req(tools=[{"name": "search"}])
+        ctx = make_ctx(req, s)
+        result = await _router.apply(ctx)
+        applied = next(d for d in result.decisions if d.layer == "router" and d.action == "applied")
+        assert applied.detail["tier"] == "strong"
+        assert applied.detail["reason"] == "tools_forced_strong"
+        assert len(transport.calls) == 1
+        assert transport.calls[0]["model"] == s.router_strong_model["openai"]
+    finally:
+        _router.set_transport(None)
+
+
+@pytest.mark.asyncio
+async def test_above_threshold_strong(tmp_path):
+    """difficulty >= threshold → strong directly, no self-check."""
+    s = make_settings(tmp_path)
+    s.router_difficulty_threshold = 0.0  # everything scores above
+    transport = _RecordTransport()
+    _router.set_transport(transport)
+    try:
+        req = make_req()
+        ctx = make_ctx(req, s)
+        result = await _router.apply(ctx)
+        applied = next(d for d in result.decisions if d.layer == "router" and d.action == "applied")
+        assert applied.detail["tier"] == "strong"
+        assert applied.detail["reason"] == "above_threshold"
+        assert len(transport.calls) == 1
+    finally:
+        _router.set_transport(None)
+
+
+@pytest.mark.asyncio
+async def test_strong_direct_no_confidence_check(tmp_path):
+    """Strong-direct path never runs a self-check (only 1 upstream call total)."""
+    s = make_settings(tmp_path)
+    s.router_difficulty_threshold = 0.0
+    transport = _RecordTransport()
+    _router.set_transport(transport)
+    try:
+        req = make_req()
+        ctx = make_ctx(req, s)
+        await _router.apply(ctx)
+        assert len(transport.calls) == 1
+    finally:
+        _router.set_transport(None)
+
+
+@pytest.mark.asyncio
+async def test_decision_schema_strong_direct(tmp_path):
+    """Strong-direct LayerDecision has all required keys with correct types."""
+    s = make_settings(tmp_path)
+    s.router_difficulty_threshold = 0.0
+    transport = _RecordTransport()
+    _router.set_transport(transport)
+    try:
+        req = make_req()
+        ctx = make_ctx(req, s)
+        result = await _router.apply(ctx)
+        d = next(x for x in result.decisions if x.layer == "router" and x.action == "applied")
+        assert isinstance(d.detail["difficulty"], float)
+        assert isinstance(d.detail["features"], dict)
+        assert d.detail["tier"] == "strong"
+        assert isinstance(d.detail["model"], str)
+        assert isinstance(d.detail["reason"], str)
+        assert d.detail["escalated"] is False
+        assert d.detail["confidence_score"] is None
+        assert d.detail["escalation_reason"] is None
+        assert isinstance(d.detail["est_cost_usd"], float)
+        assert isinstance(d.detail["baseline_cost_usd"], float)
+        assert d.detail["baseline_is_estimate"] is True
+        assert isinstance(d.detail["est_saved_usd"], float)
+    finally:
+        _router.set_transport(None)

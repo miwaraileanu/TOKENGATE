@@ -76,6 +76,21 @@ def _score_difficulty(req: GatewayRequest, settings) -> tuple[float, dict]:
     return total, features
 
 
+def _call_model(req: GatewayRequest, model_name: str) -> GatewayRequest:
+    """Return a copy of req with only the model name replaced."""
+    return GatewayRequest(
+        messages=req.messages,
+        model=model_name,
+        stream=False,
+        max_tokens=req.max_tokens,
+        temperature=req.temperature,
+        tools=req.tools,
+        route=req.route,
+        raw_headers=req.raw_headers,
+        extra=req.extra,
+    )
+
+
 async def apply(ctx: LayerContext) -> LayerContext:
     req = ctx.request
     settings = ctx.settings
@@ -90,4 +105,53 @@ async def apply(ctx: LayerContext) -> LayerContext:
         ctx.decisions.append(LayerDecision("router", "skip", {"reason": "streaming"}))
         return ctx
 
+    # 3. Score difficulty
+    difficulty, features = _score_difficulty(req, settings)
+
+    cheap_model = settings.router_cheap_model[req.route]
+    strong_model = settings.router_strong_model[req.route]
+
+    # 4. Tier selection — first match wins
+    if req.tools and settings.router_tools_tier == "strong":
+        tier = "strong"
+        reason = "tools_forced_strong"
+    elif req.raw_headers.get("x-tokengate-tier") == "strong":
+        tier = "strong"
+        reason = "client_override"
+    elif difficulty >= settings.router_difficulty_threshold:
+        tier = "strong"
+        reason = "above_threshold"
+    else:
+        tier = "cheap"
+        reason = "below_threshold"
+
+    # 5. Strong-direct path (no self-check ever)
+    if tier == "strong":
+        strong_resp = await call_upstream(
+            _call_model(req, strong_model), settings, transport=_transport
+        )
+        ctx.response = strong_resp
+
+        strong_cost = (
+            compute_cost(strong_model, strong_resp.tokens_in, strong_resp.tokens_out, settings)
+            or 0.0
+        )
+
+        ctx.decisions.append(LayerDecision("router", "applied", {
+            "difficulty": difficulty,
+            "features": features,
+            "tier": "strong",
+            "model": strong_model,
+            "reason": reason,
+            "escalated": False,
+            "confidence_score": None,
+            "escalation_reason": None,
+            "est_cost_usd": strong_cost,
+            "baseline_cost_usd": strong_cost,
+            "baseline_is_estimate": True,
+            "est_saved_usd": 0.0,
+        }))
+        return ctx
+
+    # 6. Cheap path — implemented in Task 6
     return ctx
