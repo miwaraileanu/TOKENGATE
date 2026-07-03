@@ -575,3 +575,52 @@ async def test_self_check_call_params(tmp_path):
         assert check_call.get("model") == s.router_cheap_model["openai"]
     finally:
         _router.set_transport(None)
+
+
+def test_retrain_load_from_db_filters_cheap_only(tmp_path):
+    """load_from_db returns only cheap-routed rows with correct feature shape."""
+    import json
+    import sqlite3
+    import time
+    from scripts.retrain_router import load_from_db
+
+    s = make_settings(tmp_path)
+    db = s.db_path
+
+    cheap_layers = json.dumps([{
+        "layer": "router", "action": "applied",
+        "detail": {
+            "tier": "cheap", "escalated": False,
+            "features": {
+                "length": 0.1, "tools": 0.0, "code": 0.0,
+                "math": 0.0, "multi_step": 0.0, "depth": 0.05,
+            },
+        },
+    }])
+    strong_layers = json.dumps([{
+        "layer": "router", "action": "applied",
+        "detail": {
+            "tier": "strong", "escalated": False,
+            "features": {
+                "length": 0.4, "tools": 0.25, "code": 0.0,
+                "math": 0.0, "multi_step": 0.0, "depth": 0.1,
+            },
+        },
+    }])
+
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO requests (ts, route, status, layers_applied, est_saved_usd) VALUES (?,?,?,?,?)",
+        (time.time(), "openai", "ok", cheap_layers, 0.001),
+    )
+    con.execute(
+        "INSERT INTO requests (ts, route, status, layers_applied, est_saved_usd) VALUES (?,?,?,?,?)",
+        (time.time(), "openai", "ok", strong_layers, 0.0),
+    )
+    con.commit()
+    con.close()
+
+    features, labels = load_from_db(db)
+    assert len(features) == 1  # only the cheap row
+    assert len(features[0]) == 6  # all 6 feature keys
+    assert labels[0] == 0  # not escalated
