@@ -56,3 +56,33 @@ class Settings:
             r"\btoday\b", r"\bnow\b", r"\blatest\b", r"\bprice\b",
         ]))
         self.cache_serve_unverified: bool = bool(_c.get("serve_unverified", False))
+
+        _d = raw.get("distill", {})
+        self.distill_threshold_tokens: int = int(_d.get("threshold_tokens", 6000))
+        self.distill_keep_recent_turns: int = int(_d.get("keep_recent_turns", 4))
+        self.distill_top_k: int = int(_d.get("top_k", 3))
+        self.distill_ttl_seconds: int = int(_d.get("ttl_seconds", 86400))
+        _dm = _d.get("model", {})
+        self.distill_model: dict[str, str] = {
+            "anthropic": _dm.get("anthropic", "claude-haiku-4-5"),
+            "openai": _dm.get("openai", "gpt-4o-mini"),
+        }
+
+        _b = raw.get("budget", {})
+        self.budget_chat: int = int(_b.get("chat", 1024))
+        self.budget_extraction: int = int(_b.get("extraction", 512))
+        self.budget_code: int = int(_b.get("code", 2048))
+        self.budget_long_form: int = int(_b.get("long_form", 4096))
+        self.budget_extraction_instruction: str = _b.get(
+            "extraction_instruction",
+            "Answer with the requested data only, no preamble.",
+        )
+        self.budget_extraction_instruction_enabled: bool = bool(
+            _b.get("extraction_instruction_enabled", True)
+        )
+        self.budget_table: dict[str, int] = {
+            "chat": self.budget_chat,
+            "extraction": self.budget_extraction,
+            "code": self.budget_code,
+            "long_form": self.budget_long_form,
+        }

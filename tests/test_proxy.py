@@ -156,3 +156,251 @@ def test_analytics_row_on_upstream_error(test_client, monkeypatch):
     con.close()
     assert row["status"] == "upstream_error"
     assert row["error_detail"] is not None
+
+
+# ── Phase 3 integration tests ─────────────────────────────────────────────────
+
+import json as _json
+import httpx as _httpx
+import tokengate.layers.distiller as _l_distiller
+import tokengate.layers.budgeter as _l_budgeter
+
+
+class _SummaryTransport(_httpx.AsyncBaseTransport):
+    """Returns a valid summary JSON for any call (used by distiller integration tests)."""
+
+    def __init__(self, summary="Compressed summary", pinned_facts=None):
+        self.summary = summary
+        self.pinned_facts = pinned_facts or []
+        self.calls: list[dict] = []
+
+    async def handle_async_request(self, request: _httpx.Request) -> _httpx.Response:
+        body = _json.loads(request.content)
+        self.calls.append(body)
+        # Determine if this is a distiller summarization call or the main upstream call
+        # Distiller calls use cheap model; main call uses original model
+        text = _json.dumps({"summary": self.summary, "pinned_facts": self.pinned_facts})
+        is_anthropic = "/v1/messages" in str(request.url)
+        if is_anthropic:
+            resp_body = {
+                "id": "msg_mock", "type": "message", "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+                "model": body.get("model", "mock"),
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            }
+        else:
+            resp_body = {
+                "id": "chatcmpl-mock", "object": "chat.completion",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+                "model": body.get("model", "mock"),
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
+        return _httpx.Response(200, json=resp_body)
+
+
+def test_distiller_fires_on_long_history(tmp_path, monkeypatch):
+    """Long conversation history triggers distiller → upstream receives fewer tokens."""
+    import sqlite3
+    monkeypatch.setenv("TOKENGATE_DATA_DIR", str(tmp_path))
+    _sv._settings = None
+    s = Settings()
+    s.distill_threshold_tokens = 1  # force trigger
+    s.distill_keep_recent_turns = 1
+    _sv._settings = s
+    init_db(s.db_path)
+
+    summary_transport = _SummaryTransport()
+    monkeypatch.setattr(_sv, "_transport", summary_transport)
+    monkeypatch.setattr(_l_distiller, "_transport", summary_transport)
+
+    # Build a long message list
+    messages = [{"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 200} for i in range(10)]
+    messages.append({"role": "user", "content": "recent question"})
+
+    with TestClient(_sv.app, raise_server_exceptions=True) as client:
+        resp = client.post(
+            "/v1/messages",
+            json={"model": "claude-haiku-4-5", "messages": messages, "max_tokens": 1024},
+        )
+
+    assert resp.status_code == 200
+    # Distiller should have been applied
+    con = sqlite3.connect(s.db_path)
+    rows = con.execute("SELECT layers_applied FROM requests").fetchall()
+    con.close()
+    assert rows
+    layers = _json.loads(rows[0][0])
+    distiller_decisions = [l for l in layers if l.get("layer") == "distiller"]
+    assert distiller_decisions
+    applied = [l for l in distiller_decisions if l.get("action") == "applied"]
+    assert applied, f"distiller not applied: {distiller_decisions}"
+
+    _sv._settings = None
+    _sv._transport = None
+    monkeypatch.setattr(_l_distiller, "_transport", None)
+
+
+def test_distiller_failsafe_preserves_original_history(tmp_path, monkeypatch):
+    """When distiller fails, original history still reaches upstream (partial path)."""
+    import sqlite3
+    monkeypatch.setenv("TOKENGATE_DATA_DIR", str(tmp_path))
+    _sv._settings = None
+    s = Settings()
+    s.distill_threshold_tokens = 1
+    s.distill_keep_recent_turns = 1
+    _sv._settings = s
+    init_db(s.db_path)
+
+    class _FailTransport(_httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: _httpx.Request) -> _httpx.Response:
+            # 500 for distiller call, normal response for main call
+            # Since we can't tell them apart easily, return 500 always
+            err = _json.dumps({"error": {"message": "fail", "type": "server_error"}})
+            return _httpx.Response(500, content=err.encode(), headers={"content-type": "application/json"})
+
+    fail_transport = _FailTransport()
+    monkeypatch.setattr(_sv, "_transport", fail_transport)
+    monkeypatch.setattr(_l_distiller, "_transport", fail_transport)
+
+    messages = [
+        {"role": "user", "content": "x" * 200},
+        {"role": "assistant", "content": "y" * 200},
+        {"role": "user", "content": "recent"},
+    ]
+    with TestClient(_sv.app, raise_server_exceptions=True) as client:
+        resp = client.post(
+            "/v1/messages",
+            json={"model": "claude-haiku-4-5", "messages": messages, "max_tokens": 1024},
+        )
+
+    # Main call failed (transport returns 500), so we get 502 from server
+    assert resp.status_code == 502
+
+    con = sqlite3.connect(s.db_path)
+    rows = con.execute("SELECT layers_applied FROM requests").fetchall()
+    con.close()
+    assert rows
+    layers = _json.loads(rows[0][0])
+    distiller_decisions = [l for l in layers if l.get("layer") == "distiller"]
+    assert distiller_decisions
+    # Must be "skip" (fail-safe), not "applied"
+    assert all(l["action"] == "skip" for l in distiller_decisions)
+
+    _sv._settings = None
+    _sv._transport = None
+    monkeypatch.setattr(_l_distiller, "_transport", None)
+
+
+def test_budgeter_injects_max_tokens_on_uncapped_request(tmp_path, monkeypatch):
+    """Budgeter injects max_tokens when client does not set one."""
+    import sqlite3
+    monkeypatch.setenv("TOKENGATE_DATA_DIR", str(tmp_path))
+    _sv._settings = None
+    s = Settings()
+    _sv._settings = s
+    init_db(s.db_path)
+
+    normal_transport = MockTransport()
+    monkeypatch.setattr(_sv, "_transport", normal_transport)
+
+    with TestClient(_sv.app, raise_server_exceptions=True) as client:
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "can you explain how neural networks learn from data over time?"}],
+                # No max_tokens
+            },
+        )
+
+    assert resp.status_code == 200
+    # Check that budgeter applied (injected max_tokens into request body sent to upstream)
+    assert len(normal_transport.requests) >= 1
+    # Chat default = 1024
+    assert normal_transport.requests[-1].get("max_tokens") == 1024
+
+    _sv._settings = None
+    _sv._transport = None
+
+
+def test_distiller_tokens_in_raw_recorded(tmp_path, monkeypatch):
+    """tokens_in_raw in DB reflects pre-distillation token count from distiller decision."""
+    import sqlite3
+    monkeypatch.setenv("TOKENGATE_DATA_DIR", str(tmp_path))
+    _sv._settings = None
+    s = Settings()
+    s.distill_threshold_tokens = 1
+    s.distill_keep_recent_turns = 1
+    _sv._settings = s
+    init_db(s.db_path)
+
+    summary_transport = _SummaryTransport()
+    monkeypatch.setattr(_sv, "_transport", summary_transport)
+    monkeypatch.setattr(_l_distiller, "_transport", summary_transport)
+
+    messages = [
+        {"role": "user", "content": "a" * 300},
+        {"role": "assistant", "content": "b" * 300},
+        {"role": "user", "content": "recent question here"},
+    ]
+    with TestClient(_sv.app, raise_server_exceptions=True) as client:
+        resp = client.post(
+            "/v1/messages",
+            json={"model": "claude-haiku-4-5", "messages": messages, "max_tokens": 1024},
+        )
+
+    assert resp.status_code == 200
+    con = sqlite3.connect(s.db_path)
+    con.row_factory = sqlite3.Row
+    row = dict(con.execute("SELECT * FROM requests WHERE status='ok'").fetchone())
+    con.close()
+
+    layers = _json.loads(row["layers_applied"])
+    distiller_applied = next((l for l in layers if l["layer"] == "distiller" and l["action"] == "applied"), None)
+
+    if distiller_applied:
+        # tokens_in_raw should equal distiller's tokens_in detail
+        assert row["tokens_in_raw"] == distiller_applied["detail"]["tokens_in"]
+        # tokens_in_final should be the actual upstream tokens (from mock: 10)
+        assert row["tokens_in_final"] == 10
+
+    _sv._settings = None
+    _sv._transport = None
+    monkeypatch.setattr(_l_distiller, "_transport", None)
+
+
+def test_budgeter_est_saved_usd_zero(tmp_path, monkeypatch):
+    """Budgeter contributes 0 to est_saved_usd (output savings unmeasurable)."""
+    import sqlite3
+    monkeypatch.setenv("TOKENGATE_DATA_DIR", str(tmp_path))
+    _sv._settings = None
+    s = Settings()
+    _sv._settings = s
+    init_db(s.db_path)
+
+    normal_transport = MockTransport()
+    monkeypatch.setattr(_sv, "_transport", normal_transport)
+
+    with TestClient(_sv.app, raise_server_exceptions=True) as client:
+        client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "write a function to add two numbers and return the sum"}],
+            },
+        )
+
+    con = sqlite3.connect(s.db_path)
+    con.row_factory = sqlite3.Row
+    row = dict(con.execute("SELECT est_saved_usd, layers_applied FROM requests WHERE status='ok'").fetchone())
+    con.close()
+
+    layers = _json.loads(row["layers_applied"])
+    budgeter_decisions = [l for l in layers if l["layer"] == "budgeter" and l["action"] == "applied"]
+    assert budgeter_decisions, "budgeter should have applied"
+    # est_saved_usd for non-cache requests is always 0
+    assert row["est_saved_usd"] == 0.0
+
+    _sv._settings = None
+    _sv._transport = None

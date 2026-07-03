@@ -51,6 +51,11 @@ def _embed(text: str):
     return _model.encode([text], normalize_embeddings=True)[0]
 
 
+def embed(text: str):
+    """Public wrapper used by the distiller layer."""
+    return _embed(text)
+
+
 def _query_text(req) -> str:
     """System prompt fingerprint (first 100 chars) + last user message."""
     system_fp = ""

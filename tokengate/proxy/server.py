@@ -16,7 +16,7 @@ from tokengate.core.tokens import compute_cost
 
 from tokengate.core.config import Settings
 from tokengate.core.context import LayerContext
-from tokengate.analytics.db import init_db, write_row
+from tokengate.analytics.db import init_db, write_row, evict_expired
 from tokengate.analytics.stats import get_stats, get_recent
 import tokengate.layers.exact_cache as _l_exact
 import tokengate.layers.semantic_cache as _l_semantic
@@ -75,6 +75,7 @@ async def lifespan(app: FastAPI):
     check_startup(s)
     s.db_path.parent.mkdir(parents=True, exist_ok=True)
     init_db(s.db_path)
+    evict_expired(s.db_path)
     if _l_semantic.can_embed():
         _l_semantic.load_index(s.db_path, s.cache_max_entries)
     yield
@@ -188,12 +189,19 @@ async def _non_streaming_response(req, ctx: LayerContext, s: Settings, start_ts:
         est_cost = compute_cost(model, tokens_in, tokens_out, s)
         est_saved = 0.0
 
+    # tokens_in_raw: pre-distillation count from distiller decision, else actual
+    tokens_in_raw = next(
+        (d.detail.get("tokens_in") for d in ctx.decisions
+         if d.layer == "distiller" and d.action == "applied"),
+        None,
+    ) or tokens_in or None
+
     latency_ms = int((time.time() - start_ts) * 1000)
     write_row(
         s.db_path,
         ts=start_ts, route=req.route, status=status, error_detail=error_detail,
         layers_applied=[asdict(d) for d in ctx.decisions],
-        tokens_in_raw=tokens_in or None, tokens_in_final=tokens_in or None,
+        tokens_in_raw=tokens_in_raw, tokens_in_final=tokens_in or None,
         tokens_out=tokens_out or None, model_used=model,
         cache_kind=cache_kind,
         latency_ms=latency_ms,

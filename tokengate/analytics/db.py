@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 
@@ -40,6 +41,24 @@ CREATE TABLE IF NOT EXISTS cache_semantic (
     ts         REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS cache_semantic_ts ON cache_semantic(ts);
+
+CREATE TABLE IF NOT EXISTS cache_summary (
+    turns_hash   TEXT PRIMARY KEY,
+    parent_hash  TEXT,
+    summary      TEXT NOT NULL,
+    pinned_facts TEXT NOT NULL DEFAULT '[]',
+    expires_at   REAL NOT NULL,
+    ts           REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cache_summary_parent ON cache_summary(parent_hash);
+
+CREATE TABLE IF NOT EXISTS distiller_turns (
+    turn_hash    TEXT PRIMARY KEY,
+    turn_text    TEXT NOT NULL,
+    embedding    BLOB,
+    expires_at   REAL NOT NULL,
+    ts           REAL NOT NULL
+);
 """
 
 
@@ -47,6 +66,17 @@ def init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(db_path)
     con.executescript(_SCHEMA)
+    con.commit()
+    con.close()
+
+
+def evict_expired(db_path: Path) -> None:
+    """Delete rows past their TTL from all time-bounded tables."""
+    now = time.time()
+    con = sqlite3.connect(db_path)
+    con.execute("DELETE FROM cache_exact WHERE expires_at < ?", (now,))
+    con.execute("DELETE FROM cache_summary WHERE expires_at < ?", (now,))
+    con.execute("DELETE FROM distiller_turns WHERE expires_at < ?", (now,))
     con.commit()
     con.close()
 
