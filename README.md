@@ -29,10 +29,22 @@ TokenGate applies all of them **outside your code**, with full transparency: eve
 | **L1 Exact cache** | Identical request → instant answer, zero API tokens | 100% on repeats |
 | **L2 Semantic cache** | Paraphrased question → finds the cached answer via local embeddings (no API cost) | 100% on near-repeats |
 | **Context distiller** | Long chat history → rolling summary + only the relevant past turns. Pinned user facts are never lost | 40–80% of input |
-| **Cascade router** | Easy request → cheap model. Hard request → strong model. Auto-escalates if the cheap answer fails a self-check | 60–90% on easy traffic |
+| **Cascade router** | Easy request → cheap model. Hard request → strong model. Auto-escalates if the cheap answer fails a self-check. Escalated requests cost *more* than going strong directly (cheap + check + strong overhead) — the dashboard shows negative saved dollars honestly, not hidden | 60–90% on easy traffic |
 | **Output budgeter** | Sensible `max_tokens` + concision hints per request type | 10–30% of output |
 
 Safety rails: time-sensitive queries, personal data, and tool calls **bypass caches entirely**. Lossy compression is opt-in. Every applied layer is reported in `x-tokengate-*` response headers.
+
+## Status
+
+| Phase | What | State |
+|---|---|---|
+| 1 — Foundation | Proxy, analytics, exact cache, streaming passthrough | ✅ Complete |
+| 2 — Semantic cache | Embedding-based cache with similarity threshold and LRU index | ✅ Complete |
+| 3 — Distiller + Budgeter | Rolling summarisation, pinned facts, per-type output caps | ✅ Complete |
+| 4 — Cascade router | Difficulty scoring, cheap → self-check → escalation, cost accounting | ✅ Complete |
+| 5 — Compressor + ops | Prompt compression, rate limiting, Docker, per-route policies | 🔧 In progress |
+
+196 tests, all passing. Phases 1–4 are the live feature set.
 
 ## Quickstart
 
@@ -116,7 +128,7 @@ Your actual savings depend entirely on your traffic: a FAQ chatbot with repetiti
 Your app ──HTTP──▶ TokenGate ──▶ LLM Provider
                       │
    L1 exact cache → L2 semantic cache → distiller
-        → compressor (opt-in) → cascade router → budgeter
+        → compressor (opt-in) → budgeter → cascade router
                       │
             SQLite analytics + dashboard
 ```
